@@ -1,4 +1,6 @@
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
+import { flushSync } from 'react-dom'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import SessionAutomationPopover from '../components/SessionAutomationPopover'
@@ -177,9 +179,16 @@ describe('SessionAutomationPopover', () => {
       renderPopover(activeLegacyLoop, vi.fn(), true, vi.fn(), sessionMode)
 
       expect(screen.getByRole('textbox', { name: 'Goal description' })).toBeDisabled()
-      expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+      // With writes off, Pause -- the route to Stop on a running loop -- cannot
+      // be pressed, so the row holds Stop itself (behind its confirm) and draws
+      // neither of the dead write controls; the schedule line's Nudge now is
+      // dead too. Stale state stays clearable, nothing is written.
+      expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Pause loop' })).toBeNull()
+      expect(screen.getByTestId('auto-nudge-trigger')).toBeDisabled()
       expect(screen.getByRole('button', { name: 'Stop loop' })).toBeEnabled()
-      fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Stop loop' }))
+      expect(screen.getByRole('button', { name: 'Clear' })).toBeEnabled()
       expect(fetchMock).not.toHaveBeenCalled()
     },
   )
@@ -202,6 +211,24 @@ describe('SessionAutomationPopover', () => {
 
     expect(screen.queryByText('Next cycle not yet scheduled')).toBeNull()
     expect(screen.getByText(/Next cycle in/)).toBeInTheDocument()
+  })
+
+  it('carries the stop reason through the compatibility bridge, so a manual pause reads Paused and a bound stop reads Stopped', () => {
+    // The goal editor tells the two apart on `stopped_reason === 'manual'`
+    // alone. A bridge that drops the field makes every inactive loop --
+    // including one the user has just paused -- render as Stopped with an
+    // erase control and no Resume.
+    renderPopover({ ...activeLegacyLoop, active: false, nextDueAt: 0, stoppedReason: 'manual' })
+    expect(screen.getByRole('button', { name: 'Resume loop and nudge now' })).toBeInTheDocument()
+    expect(screen.getByTestId('auto-nudge-loop-paused-manually')).toHaveTextContent('Paused')
+    expect(screen.queryByRole('button', { name: 'Clear stopped goal' })).toBeNull()
+  })
+
+  it('keeps a bound-stopped legacy loop on the Stopped path through the bridge', () => {
+    renderPopover({ ...activeLegacyLoop, active: false, nextDueAt: 0, stoppedReason: 'cycle_cap' })
+    expect(screen.getByTestId('auto-nudge-loop-paused')).toHaveTextContent('Stopped')
+    expect(screen.getByRole('button', { name: 'Clear stopped goal' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Resume loop and nudge now' })).toBeNull()
   })
 
   it('centres the radar glyph and its count in the composer trigger', () => {
@@ -892,14 +919,173 @@ describe('SessionAutomationPopover', () => {
     expect(screen.getByRole('spinbutton', { name: 'Seconds between nudges' })).toHaveValue(300)
     expect(screen.getByRole('spinbutton', { name: 'Max cycles (0 = infinite)' })).toHaveValue(24)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    // Edit one field, then Save: the write goes to the LEGACY loop's id and
+    // carries the edited field only -- the untouched interval and cap are not
+    // written back. No `active` on a running loop's save: the field would be
+    // a no-op while the loop runs and a silent revive if it stopped between
+    // render and press.
+    fireEvent.change(screen.getByRole('textbox', { name: 'Goal description' }), {
+      target: { value: 'Keep checking, closely.' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save without nudging' }))
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/autonudge/legacy-1', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: 'Keep checking.', idle_secs: 300, max_cycles: 24, active: true,
-      }),
+      body: JSON.stringify({ message: 'Keep checking, closely.' }),
     }))
+  })
+
+  it('a two-leg press (write, then fire) hands the parent ONE record -- the fired one, carrying the armed deadline', async () => {
+    // ChatPage re-identifies `automation` on every hand-off
+    // (`dispatch(sseAutomation(next))`), and this bridge's onChange guard
+    // (`sameRecord` / `firedSince`) drops a hand-off whose pressed closure no
+    // longer addresses the record the parent holds. A press with a write leg
+    // and a fire leg therefore hands up ONE record, once the fire settled: the
+    // fired record with the armed deadline. Two hand-offs would be two
+    // records for one press, the second superseding the first a moment later,
+    // so the schedule would briefly read a full countdown and Trigger stay
+    // enabled on the due cycle. `flushSync` stands in for the store
+    // notification, which re-renders the parent before the next leg's
+    // response can arrive.
+    const written = {
+      id: 'legacy-1', slot_key: 'chat-1', message: 'edited', idle_secs: 300, max_cycles: 24,
+      cycle_count: 2, active: true, last_fire_ts: 0, next_due_ts: 1_900_000_300, stopped_reason: '',
+    }
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      const answers = init?.method === 'PATCH' || /\/fire$/.test(String(url))
+      return Promise.resolve(new Response(JSON.stringify(answers ? { ok: true, loop: written } : { loop: null }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const received: (AutomationRecord | null)[] = []
+    const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } })
+    function Parent() {
+      const [automation, setAutomation] = useState<AutomationRecord | null>(activeLegacyLoop)
+      return (
+        <QueryClientProvider client={client}>
+          <SessionAutomationPopover
+            slotKey="chat-1"
+            automation={automation}
+            open={true}
+            onOpenChange={() => {}}
+            onChange={next => { received.push(next); flushSync(() => setAutomation(next)) }}
+            creationReady={true}
+            sessionMode=""
+          />
+        </QueryClientProvider>
+      )
+    }
+    render(<Parent />)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Goal description' }), { target: { value: 'edited' } })
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save edits and nudge now' })) })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/autonudge/legacy-1/fire', expect.objectContaining({ method: 'POST' })))
+    expect(received).toHaveLength(1)
+    const handed = received[0] as LegacyGoalLoop
+    expect(handed.kind).toBe('legacy_goal_loop')
+    expect(handed.message).toBe('edited')
+    // The armed deadline, not the write response's fresh full countdown.
+    expect(Math.abs((handed.nextDueAt ?? 0) - Date.now() / 1000)).toBeLessThan(5)
+  })
+
+  /** A parent that holds `automation` as state, with a `frame` hook the fetch
+   *  mock can pull to re-identify the record mid-press -- the way the write
+   *  leg's `autonudge_state` frame reaches the store (and this bridge's prop)
+   *  before the fire leg's response does. */
+  function interleavedParent(fetchMock: ReturnType<typeof vi.fn>) {
+    const received: (AutomationRecord | null)[] = []
+    const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } })
+    const frame: { current: ((record: AutomationRecord) => void) | null } = { current: null }
+    function Parent() {
+      const [automation, setAutomation] = useState<AutomationRecord | null>(activeLegacyLoop)
+      frame.current = record => flushSync(() => setAutomation(record))
+      return (
+        <QueryClientProvider client={client}>
+          <SessionAutomationPopover
+            slotKey="chat-1"
+            automation={automation}
+            open={true}
+            onOpenChange={() => {}}
+            onChange={next => { received.push(next); flushSync(() => setAutomation(next)) }}
+            creationReady={true}
+            sessionMode=""
+          />
+        </QueryClientProvider>
+      )
+    }
+    vi.stubGlobal('fetch', fetchMock)
+    render(<Parent />)
+    return { received, frame }
+  }
+
+  it('a frame that re-identifies the SAME loop between the write leg and the fire leg does not cost the press its hand-off: the fired record still reaches the parent', async () => {
+    // The write leg's PATCH makes the service emit `updated`, which the gateway
+    // broadcasts as an `autonudge_state` frame; the store dispatch hands this
+    // bridge a NEW `automation` object for the same loop before the fire leg's
+    // response arrives. A guard on object identity alone then dropped the
+    // press's one hand-off, so the parent kept the frame's record -- a full
+    // countdown over a cycle that is armed to run now, with Nudge now still
+    // enabled on it (GPT, head 5b284e13c7). Same loop, same slot = the hand-off
+    // stands.
+    const written = {
+      id: 'legacy-1', slot_key: 'chat-1', message: 'edited', idle_secs: 300, max_cycles: 24,
+      cycle_count: 2, active: true, last_fire_ts: 1_899_999_700, next_due_ts: 1_900_000_300, stopped_reason: '',
+    }
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (/\/fire$/.test(String(url))) frame.current?.(normalizeAutomationRecord({ ...written }) as AutomationRecord)
+      const answers = init?.method === 'PATCH' || /\/fire$/.test(String(url))
+      return Promise.resolve(new Response(JSON.stringify(answers ? { ok: true, loop: written } : { loop: null }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      }))
+    })
+    const { received, frame } = interleavedParent(fetchMock)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Goal description' }), { target: { value: 'edited' } })
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save edits and nudge now' })) })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/autonudge/legacy-1/fire', expect.objectContaining({ method: 'POST' })))
+    await waitFor(() => expect(received).toHaveLength(1))
+    const handed = received[0] as LegacyGoalLoop
+    expect(handed.kind).toBe('legacy_goal_loop')
+    expect(handed.id).toBe('legacy-1')
+    expect(handed.message).toBe('edited')
+    // The fired record's armed deadline, not the frame's full countdown.
+    expect(Math.abs((handed.nextDueAt ?? 0) - Date.now() / 1000)).toBeLessThan(5)
+  })
+
+  it('a fire the frame already delivered wins over the press\'s hand-off: the hand-off is dropped, the parent keeps the delivered record', async () => {
+    // The opposite interleaving: the service fired and its `fired` frame landed
+    // (count up, deadline a full interval away) before the fire leg's response
+    // was handled. The hand-off carries the pre-delivery record with a deadline
+    // of "now" -- applying it would roll the count back and read "Next cycle
+    // due" for a cycle already delivered, until the following frame a whole
+    // interval later. A loop that fired since the press keeps the frame.
+    const written = {
+      id: 'legacy-1', slot_key: 'chat-1', message: 'edited', idle_secs: 300, max_cycles: 24,
+      cycle_count: 2, active: true, last_fire_ts: 1_899_999_700, next_due_ts: 1_900_000_300, stopped_reason: '',
+    }
+    const nowTs = Math.floor(Date.now() / 1000)
+    const delivered = { ...written, cycle_count: 3, last_fire_ts: nowTs, next_due_ts: nowTs + 300 }
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (/\/fire$/.test(String(url))) frame.current?.(normalizeAutomationRecord({ ...delivered }) as AutomationRecord)
+      const answers = init?.method === 'PATCH' || /\/fire$/.test(String(url))
+      return Promise.resolve(new Response(JSON.stringify(answers ? { ok: true, loop: written } : { loop: null }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      }))
+    })
+    const { received, frame } = interleavedParent(fetchMock)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Goal description' }), { target: { value: 'edited' } })
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save edits and nudge now' })) })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/autonudge/legacy-1/fire', expect.objectContaining({ method: 'POST' })))
+    // Let the fire leg settle: nothing may reach the parent.
+    await act(async () => { await Promise.resolve() })
+    expect(received).toHaveLength(0)
+    // The delivered frame's reading stands: cycle 3 of 24 in the trigger's name.
+    expect(screen.getByRole('button', { name: /Goal active \(cycle 3\/24\)/ })).toBeTruthy()
   })
 
   it('applies a mutation response when the captured automation is still current', async () => {

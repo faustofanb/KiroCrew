@@ -126,12 +126,45 @@ function legacyWire(loop: LegacyGoalLoop): AutoNudgeLoop {
     active: loop.active,
     last_fire_ts: loop.lastFireAt,
     next_due_ts: loop.nextDueAt ?? 0,
+    // The goal editor tells a PAUSED loop (resumable in place) from a STOPPED
+    // one on this field alone; dropping it here rendered every inactive loop,
+    // including one the user had just paused, as Stopped with an erase control.
+    stopped_reason: loop.stoppedReason,
     ...(loop.stopSentinelPath !== undefined ? { stop_sentinel_path: loop.stopSentinelPath } : {}),
     ...(loop.judge !== undefined ? { judge: loop.judge } : {}),
     ...(loop.judge_last_verdict !== undefined
       ? { judge_last_verdict: loop.judge_last_verdict }
       : {}),
   }
+}
+
+/** Whether a hand-off from a pressed render still addresses the record the
+ *  parent holds NOW. The same object, or the same goal loop -- kind, id and
+ *  slot -- under a new object. The parent re-identifies `automation` on every
+ *  store dispatch, and a two-leg press (write, then fire) has a frame in its
+ *  gap: the write leg's PATCH makes the service emit `updated`, the gateway
+ *  broadcasts it as `autonudge_state`, and the store hands this bridge a new
+ *  object for the same loop before the fire leg's response is back. A guard on
+ *  object identity alone dropped the press's one hand-off there, so the parent
+ *  kept the frame's full countdown over a cycle armed to run now, with Nudge
+ *  now still enabled on it. A different loop, no loop where one was, or a loop
+ *  replaced by a bounded monitor is a stale closure and is still dropped. */
+function sameRecord(current: AutomationRecord | null, captured: AutomationRecord | null): boolean {
+  if (current === captured) return true
+  return current?.kind === 'legacy_goal_loop'
+    && captured?.kind === 'legacy_goal_loop'
+    && current.id === captured.id
+    && current.slotKey === captured.slotKey
+}
+
+/** The opposite interleaving: the loop FIRED between the press and the
+ *  hand-off, and its `fired` frame already landed -- count up, deadline a full
+ *  interval away. The hand-off carries the pre-delivery record with the armed
+ *  deadline of "now"; applying it would roll the count back and read the
+ *  delivered cycle as due until the next frame, an interval later. A later
+ *  fire on the parent's record outranks the press's. */
+function firedSince(current: AutomationRecord | null, handed: AutoNudgeLoop): boolean {
+  return current?.kind === 'legacy_goal_loop' && current.lastFireAt > (handed.last_fire_ts || 0)
 }
 
 function boundedInteger(
@@ -494,7 +527,8 @@ export default function SessionAutomationPopover({
       open={open}
       onOpenChange={requestOpenChange}
       onChange={loop => {
-        if (automationRef.current !== automation) return
+        if (!sameRecord(automationRef.current, automation)) return
+        if (loop && firedSince(automationRef.current, loop)) return
         onChange(loop ? normalizeAutomationRecord(loop) : null)
       }}
       onSetUpBoundedMonitor={legacyLoop ? undefined : () => setBoundedModeSlot(slotKey)}
