@@ -1,3 +1,5 @@
+import { i18nT } from '../i18n/t'
+
 /**
  * Which agent harness the gateway runs, read off `agent.acp_backend` in the
  * `/api/config/kirocrew` body (the `['kirocrewConfig']` query).
@@ -12,6 +14,10 @@
  *  back to kiro-cli when the key is absent, so an absent key names kiro too. */
 export const ACP_BACKEND_KIRO = ''
 
+/** The KAS backend's id (`ACP_BACKEND_KAS` on the gateway): kiro-cli's relay,
+ *  which completes first-run setup on kiro-cli ACP support, not a kiro-cli login. */
+export const ACP_BACKEND_KAS = 'kas'
+
 /** The slice of the config body this check reads. */
 export interface AcpBackendConfig {
   agent?: { acp_backend?: string }
@@ -25,4 +31,14 @@ export interface AcpBackendConfig {
 export function isKiroBackend(cfg: AcpBackendConfig | undefined): boolean {
   if (cfg === undefined) return false
   return (cfg.agent?.acp_backend ?? ACP_BACKEND_KIRO) === ACP_BACKEND_KIRO
+}
+
+/** Shared translated harness labels; unknown harnesses keep the server's policy name. */
+export function acpBackendName(backend: { id: string; policy_id?: string }): string {
+  switch (backend.id) {
+    case ACP_BACKEND_KIRO: return i18nT('pages.developer.agentBackendTab.kiro_cli')
+    case 'claude': return i18nT('pages.developer.agentBackendTab.claude_code')
+    case ACP_BACKEND_KAS: return i18nT('pages.developer.agentBackendTab.kas_kiro_agent')
+    default: return backend.policy_id || backend.id
+  }
 }

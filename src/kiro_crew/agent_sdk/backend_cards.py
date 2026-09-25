@@ -1,6 +1,6 @@
 """What each harness can do, projected from the memberships it already declared.
 
-The Developer > Agent Backend switch asks one question this module answers: what
+The Settings > Agent Harness switch asks one question this module answers: what
 does an operator lose or gain by picking this harness rather than that one? Every
 answer here is a PROJECTION over :mod:`kiro_crew.agent_sdk.backends` -- the
 capability sets, :data:`~kiro_crew.agent_sdk.backends.ACP_BACKEND_ROUTING`, and
@@ -328,6 +328,11 @@ OPERATOR_LINES: Tuple[_LineSpec, ...] = (
 #: DEFECT rather than an absent feature, and a card that listed defect classes in
 #: front of someone choosing a harness would be worse than one line shorter.
 OFF_CARD_SETS: Mapping[str, str] = {
+    "ACP_BACKENDS_INDEPENDENT_SETUP": (
+        "whether first-run setup may proceed without Kiro CLI. The onboarding gate "
+        "already presents this choice before a session or Settings card exists; a "
+        "wrong membership would send someone through a setup path that cannot work"
+    ),
     "ACP_BACKENDS_MEMBER_PANEL": (
         "whether a member DM session may mount its own webview. Its membership is the "
         "same as ACP_BACKENDS_MEMBER_DISPATCH's, and the member-thread-tools line "
