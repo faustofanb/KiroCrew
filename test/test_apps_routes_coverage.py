@@ -1174,6 +1174,24 @@ class TestUpdateApp:
             assert resp.status == 404
 
     @pytest.mark.asyncio
+    async def test_provenance_invalidation_reports_confirmed_vs_unconfirmed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The update seam drops the pre-update spawn record before any restart and
+        reports whether the drop is CONFIRMED. A confirmed drop returns True (restart
+        allowed); an unconfirmed one (ENOSPC/EDQUOT: forget raises) returns False so
+        the caller does NOT restart and adopt the stale-row survivor as the new code."""
+
+        monkeypatch.setattr(routes_mod, "forget_backend_provenance", lambda n: {"pid": 1})
+        assert await routes_mod._invalidate_provenance_before_restart("app") is True
+
+        def _raise(n: str) -> None:
+            raise routes_mod.PidfileDeleteFailed("disk full")
+
+        monkeypatch.setattr(routes_mod, "forget_backend_provenance", _raise)
+        assert await routes_mod._invalidate_provenance_before_restart("app") is False
+
+    @pytest.mark.asyncio
     async def test_self_managed_lifecycle_is_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1768,6 +1786,164 @@ class TestUninstallRefusals:
         assert calls == [(APP, True)]
 
     @pytest.mark.asyncio
+    async def test_unconfirmed_provenance_delete_aborts_before_on_uninstall(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GPT: an uninstall must CONFIRM the spawn-provenance deletion as a preflight
+        and ABORT on failure (ENOSPC/EDQUOT) — the earlier non-terminal 'log and keep
+        going' let the stale row survive a completed uninstall, and a same-name
+        reinstall before the next-boot reap adopted the old survivor. The abort is a
+        retryable 409 and the non-idempotent onUninstall must NOT have run."""
+
+        _setup_env(tmp_path, monkeypatch)
+        _install(tmp_path, setup={"onUninstall": "teardown.sh"})
+
+        def _delete_fails(name: str) -> dict[str, Any]:
+            raise routes_mod.PidfileDeleteFailed("no space left on device")
+
+        monkeypatch.setattr(routes_mod, "forget_backend_provenance", _delete_fails)
+
+        async def _on_uninstall_must_not_run(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("onUninstall ran despite an unconfirmed provenance delete")
+
+        monkeypatch.setattr(routes_mod, "_run_lifecycle_script", _on_uninstall_must_not_run)
+
+        def _uninstall_must_not_run(*args: Any, **kwargs: Any) -> AppResult:
+            raise AssertionError("uninstall_app deleted files despite the abort")
+
+        monkeypatch.setattr(routes_mod, "uninstall_app", _uninstall_must_not_run)
+
+        async with TestClient(TestServer(_make_app(dashboard_user="owner"))) as client:
+            resp = await client.post(f"/api/apps/{APP}/uninstall", json={})
+            assert resp.status == 409
+            body = await resp.json()
+        assert body["code"] == "provenance_not_deleted"
+        assert body["retryable"] is True
+
+    @pytest.mark.asyncio
+    async def test_failed_uninstall_restores_the_dropped_provenance_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GPT: the preflight drops the row BEFORE the stop/removal, so if a later
+        step (uninstall_app) fails and leaves the app installed, the dropped row must
+        be RESTORED — a still-installed app must keep the record that attributes its
+        own backend."""
+
+        _setup_env(tmp_path, monkeypatch)
+        _install(tmp_path)
+        dropped = {"pid": 9191, "start_time": "t", "port": 9100}
+
+        monkeypatch.setattr(routes_mod, "forget_backend_provenance", lambda n: dict(dropped))
+        restored: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            routes_mod,
+            "_restore_app_pid",
+            lambda name, row: restored.append((name, row)),
+        )
+
+        def _fail_removal(*args: Any, **kwargs: Any) -> AppResult:
+            return AppResult(ok=False, error="rmtree failed")
+
+        monkeypatch.setattr(routes_mod, "uninstall_app", _fail_removal)
+
+        async with TestClient(TestServer(_make_app(dashboard_user="owner"))) as client:
+            resp = await client.post(f"/api/apps/{APP}/uninstall", json={})
+            assert resp.status == 400
+        # The preflight-dropped row was handed to _restore_app_pid for the still-
+        # installed app.
+        assert restored == [(APP, dropped)]
+
+    @pytest.mark.asyncio
+    async def test_interrupted_uninstall_restores_provenance_via_the_finally_guard(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GPT crash-window fix: the row is dropped as the first mutation, so an
+        UNHANDLED interruption (exception / task cancellation / gateway kill) anywhere
+        in the window after the delete and before the uninstall durably commits would
+        permanently lose the only handle to a surviving backend. The finally guard
+        around the whole uninstall body restores the row on EVERY non-committing exit,
+        not just the handled aborts. Here onUninstall raises mid-window; the handler
+        surfaces a 500, and the row is still restored."""
+
+        _setup_env(tmp_path, monkeypatch)
+        _install(tmp_path, setup={"onUninstall": "teardown.sh"})
+        dropped = {"pid": 3131, "start_time": "t", "port": 9100}
+
+        monkeypatch.setattr(routes_mod, "forget_backend_provenance", lambda n: dict(dropped))
+        restored: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            routes_mod,
+            "_restore_app_pid",
+            lambda name, row: restored.append((name, row)),
+        )
+
+        async def _blow_up_mid_window(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("gateway interrupted during onUninstall")
+
+        monkeypatch.setattr(routes_mod, "_run_lifecycle_script", _blow_up_mid_window)
+
+        def _uninstall_must_not_run(*args: Any, **kwargs: Any) -> AppResult:
+            raise AssertionError("uninstall_app ran after the mid-window interruption")
+
+        monkeypatch.setattr(routes_mod, "uninstall_app", _uninstall_must_not_run)
+
+        async with TestClient(TestServer(_make_app(dashboard_user="owner"))) as client:
+            resp = await client.post(f"/api/apps/{APP}/uninstall", json={})
+            assert resp.status == 500
+        # The interruption never committed the uninstall, so the finally put the row
+        # back even though no explicit abort path ran.
+        assert restored == [(APP, dropped)]
+
+    @pytest.mark.asyncio
+    async def test_cron_cleanup_abort_restores_the_provenance_row_dropped_first(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GPT ordering fix: provenance is deleted FIRST (Step 0b), before cron
+        cleanup persists its deletions, so a provenance refusal cannot leave the
+        installed app's cron jobs already deleted. The mirror obligation: if cron
+        cleanup then aborts, the provenance row dropped first must be RESTORED so the
+        still-installed app keeps attributing its own backend."""
+
+        _setup_env(tmp_path, monkeypatch)
+        _install(tmp_path)
+        dropped = {"pid": 5151, "start_time": "t", "port": 9100}
+        order: list[str] = []
+
+        def _drop(n: str) -> dict[str, Any]:
+            order.append("provenance_drop")
+            return dict(dropped)
+
+        monkeypatch.setattr(routes_mod, "forget_backend_provenance", _drop)
+
+        restored: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            routes_mod,
+            "_restore_app_pid",
+            lambda name, row: restored.append((name, row)),
+        )
+
+        async def _cron_cleanup_fails(name: str, cron_service: Any) -> int:
+            order.append("cron_cleanup")
+            raise routes_mod.CronStoreBusy("cron store busy")
+
+        monkeypatch.setattr(routes_mod, "_deregister_crons_with_retry", _cron_cleanup_fails)
+
+        def _on_uninstall_must_not_run(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("onUninstall ran despite the cron-cleanup abort")
+
+        monkeypatch.setattr(routes_mod, "_run_lifecycle_script", _on_uninstall_must_not_run)
+
+        app = _make_app(dashboard_user="owner")
+        app["state"].crons = object()  # truthy cron service so cleanup is attempted
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(f"/api/apps/{APP}/uninstall", json={})
+            assert resp.status == 409
+        # Provenance was dropped BEFORE cron cleanup ran, and the abort restored it.
+        assert order == ["provenance_drop", "cron_cleanup"]
+        assert restored == [(APP, dropped)]
+
+    @pytest.mark.asyncio
     async def test_removable_dependencies_are_cleaned_and_reported(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1843,7 +2019,7 @@ class TestUninstallRefusals:
             }
 
         monkeypatch.setattr(routes_mod, "_run_lifecycle_script", _script)
-        monkeypatch.setattr(routes_mod, "stop_app_backend", lambda n: None)
+        monkeypatch.setattr(routes_mod, "stop_app_backend", lambda n, **_kw: None)
         async with TestClient(TestServer(_make_app(dashboard_user="owner"))) as client:
             resp = await client.post(f"/api/apps/{APP}/uninstall", json={})
             assert resp.status == 200
@@ -1866,7 +2042,7 @@ class TestUninstallRefusals:
                 ok=False, name=name, error="permission denied"
             ),
         )
-        monkeypatch.setattr(routes_mod, "stop_app_backend", lambda n: None)
+        monkeypatch.setattr(routes_mod, "stop_app_backend", lambda n, **_kw: None)
         async with TestClient(TestServer(_make_app(dashboard_user="owner"))) as client:
             resp = await client.post(f"/api/apps/{APP}/uninstall", json={})
             assert resp.status == 400

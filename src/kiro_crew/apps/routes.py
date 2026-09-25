@@ -32,6 +32,9 @@ from aiohttp import web
 from kiro_crew import platform_compat
 from kiro_crew.apps import official_catalog
 from kiro_crew.apps.backend import (
+    PidfileDeleteFailed,
+    _restore_app_pid,
+    forget_backend_provenance,
     get_app_backend_port,
     list_app_processes,
     recorded_backend_port,
@@ -688,11 +691,47 @@ async def _stop_backend_and_observe(name: str) -> tuple[int | None, bool]:
     """
     loop = asyncio.get_running_loop()
     port_hint = await loop.run_in_executor(subprocess_executor(), recorded_backend_port, name)
-    await loop.run_in_executor(subprocess_executor(), stop_app_backend, name)
+    # The spawn-provenance row has ALREADY been dropped by the uninstall's Step-1b
+    # preflight (a confirmed delete that aborts the whole uninstall on failure), so
+    # this stop takes the PLAIN path and does not touch provenance again. Doing the
+    # delete here instead would make it non-terminal — onUninstall has already run by
+    # now, so a failed delete could not abort — which is exactly the hazard the
+    # preflight exists to remove.
+    await loop.run_in_executor(subprocess_executor(), lambda: stop_app_backend(name))
     live_port = await loop.run_in_executor(
         subprocess_executor(), lambda: unstopped_backend_port(name, port_hint=port_hint)
     )
     return live_port, port_hint is not None
+
+
+async def _invalidate_provenance_before_restart(name: str) -> bool:
+    """Drop the pre-update spawn record and report whether it is confirmed gone.
+
+    An update replaces the code behind the name while reusing the port, so the
+    pre-update row still vouches for whatever rebinds it and a restart would adopt a
+    survivor running the OLD code as the new version. Called once the update has
+    committed (the rollback path has already returned), this invalidates the stale
+    row so the new spawn records its own.
+
+    Returns ``True`` when the drop is CONFIRMED on disk and the caller may restart.
+    Returns ``False`` when the write could not be confirmed (ENOSPC/EDQUOT: the row
+    stays on disk) — the caller must then NOT restart, or it would adopt the
+    stale-row survivor; the files are updated regardless and the operator restarts
+    once the disk is writable.
+    """
+    try:
+        await asyncio.get_running_loop().run_in_executor(
+            subprocess_executor(), forget_backend_provenance, name
+        )
+        return True
+    except PidfileDeleteFailed as exc:
+        logger.warning(
+            "update of %r: could not invalidate the spawn record (%s); not starting "
+            "the backend, so no old-code survivor is adopted as the new version",
+            name,
+            exc,
+        )
+        return False
 
 
 async def _app_may_run_after_install(name: str, *, fresh_install: bool = False) -> bool:
@@ -955,18 +994,33 @@ async def handle_update_app(request: web.Request) -> web.Response:
                     error=reg_install.get("error", ""),
                 )
                 return web.json_response(reg_install, status=400)
+            # The update committed. Drop the pre-update spawn record BEFORE any
+            # restart (see _invalidate_provenance_before_restart): a retained row
+            # would let the restart adopt an old-code survivor as the new version.
+            # An unconfirmed drop means do NOT restart — but the app is UPDATED and
+            # must still be re-registered so it is not left with zero resources.
+            reg_provenance_dropped = await _invalidate_provenance_before_restart(name)
             # Live read, not the pre-update ``info`` snapshot: ``update_app`` drops
             # ``enabled`` when the new version adds ``permissions.sessionApproval``,
             # and a backend started here would run an app the UI shows as disabled.
+            # Re-registration is NOT gated on the provenance drop (persist-before-you-
+            # publish: a successful update must not leave the app deregistered); only
+            # the RESTART is, so a retained row cannot be adopted as the new version.
             still_enabled = await _app_may_run_after_install(name)
             if still_enabled:
                 reg_result = await _register_app_off_loop(name)
-                await asyncio.get_running_loop().run_in_executor(
-                    subprocess_executor(), start_app_backend, name
-                )
                 reg_install["registration"] = reg_result.to_dict()
+                if reg_provenance_dropped:
+                    await asyncio.get_running_loop().run_in_executor(
+                        subprocess_executor(), start_app_backend, name
+                    )
+        # The skipped restart is recorded by the SEL outcome below
+        # (completed_without_restart) and the gateway log; it is not echoed in the
+        # response because no dashboard consumer reads a `warnings` field on update
+        # (the update UI renders only `?.notice`).
+        reg_outcome = "completed" if reg_provenance_dropped else "completed_without_restart"
         sel().log_api_access(
-            caller="dashboard", operation="app_update", outcome="completed", resources=name
+            caller="dashboard", operation="app_update", outcome=reg_outcome, resources=name
         )
         return web.json_response(reg_install)
 
@@ -1012,24 +1066,41 @@ async def handle_update_app(request: web.Request) -> web.Response:
             )
             return web.json_response(up_result.to_dict(), status=400)
 
-        # Re-register with the new manifest only if the app is STILL enabled.
-        # ``update_app`` drops ``enabled`` when the new version adds
-        # ``permissions.sessionApproval``, so the pre-update ``info`` snapshot
-        # would start a backend the user has not re-consented to.
+        # The update committed. Drop the pre-update spawn record BEFORE any restart
+        # (see _invalidate_provenance_before_restart): a retained row would let the
+        # restart adopt an old-code survivor as the new version. An unconfirmed drop
+        # means do NOT restart — but the app is still UPDATED and must be re-registered
+        # so it does not sit with zero agents/skills/crons after a successful update.
         up_reg = None
+        provenance_dropped = await _invalidate_provenance_before_restart(name)
+
+        # Re-register with the new manifest if the app is STILL enabled (``update_app``
+        # drops ``enabled`` when the new version adds ``permissions.sessionApproval``,
+        # so the pre-update ``info`` snapshot would start a backend the user has not
+        # re-consented to). Re-registration is NOT gated on the provenance drop: the
+        # files are already updated, so skipping it would leave the updated app
+        # deregistered while the endpoint reports success (persist-before-you-publish).
+        # Only the RESTART is gated on the confirmed drop — restarting on a retained
+        # row would adopt the old-code survivor the stale row still vouches for.
         still_enabled = await _app_may_run_after_install(name)
         if still_enabled:
             up_reg = await _register_app_off_loop(name)
-            await asyncio.get_running_loop().run_in_executor(
-                subprocess_executor(), start_app_backend, name
-            )
+            if provenance_dropped:
+                await asyncio.get_running_loop().run_in_executor(
+                    subprocess_executor(), start_app_backend, name
+                )
 
+    outcome = "completed" if provenance_dropped else "completed_without_restart"
     sel().log_api_access(
-        caller="dashboard", operation="app_update", outcome="completed", resources=name
+        caller="dashboard", operation="app_update", outcome=outcome, resources=name
     )
     resp: dict[str, Any] = up_result.to_dict()
     if up_reg:
         resp["registration"] = up_reg.to_dict()
+    # The skipped restart is recorded by the SEL outcome (completed_without_restart)
+    # and the gateway log; it is not echoed in the response because no dashboard
+    # consumer reads a `warnings` field on update (the update UI renders only
+    # `?.notice`).
     return web.json_response(resp)
 
 
@@ -1304,491 +1375,603 @@ async def handle_uninstall_app(request: web.Request) -> web.Response:
     # will still resume, and `dropped` on its own reads as a clean sweep.
     dropped = 0
     pointer_flush_failed = False
-    async with app_lifecycle_lock(name):
-        # A retained startup hook still owns the old app's AppContext. Bound the
-        # wait and refuse the uninstall if it remains live; deleting files or
-        # withdrawing trust first would falsely report that old code is gone.
-        startup_refusal = await _refuse_while_startup_hook_runs(name, action="uninstall")
-        if startup_refusal is not None:
-            return startup_refusal
+    # Cancellation-safe provenance guard (GPT residual/crash): Step 0b drops the
+    # row as the first mutation, and a plain delete-then-maybe-restore loses it if
+    # the task is cancelled or the gateway is killed anywhere in the lethal window
+    # (cron cleanup + a 120s onUninstall + the stop) before the uninstall durably
+    # commits. The finally restores the dropped row on EVERY exit — return,
+    # exception, or cancellation — unless the uninstall committed (uninstall_app
+    # removed the files). Before the delete dropped_provenance_row is None, so a
+    # pre-delete refusal passes through untouched; after commit the flag is set, so
+    # a successful removal keeps the row gone.
+    provenance_committed = False
+    dropped_provenance_row: dict[str, Any] | None = None
+    try:
+        async with app_lifecycle_lock(name):
+            # A retained startup hook still owns the old app's AppContext. Bound the
+            # wait and refuse the uninstall if it remains live; deleting files or
+            # withdrawing trust first would falsely report that old code is gone.
+            startup_refusal = await _refuse_while_startup_hook_runs(name, action="uninstall")
+            if startup_refusal is not None:
+                return startup_refusal
 
-        # Step 0: the execution grant must be removable before anything is
-        # destroyed. A grant is keyed on the app NAME alone, so one left behind
-        # admits a DIFFERENT app later installed under this name — code execution
-        # with no consent prompt. Checking it inside uninstall_app (Step 5)
-        # instead would make it unreachable as an abort: by then the cron
-        # manifest, the onUninstall script, the backend and the dependencies have
-        # all already been torn down, so the refusal strands a half-removed app
-        # and every retry re-runs the non-idempotent script. Asking here keeps the
-        # refusal free and the retry safe, exactly like the cron precondition.
-        # Offloaded: the precondition reads config.json and config.local.json from
-        # disk, and this is an async handler — the same reason `uninstall_app` below
-        # goes through the executor rather than being called inline.
-        grant_blocked = await asyncio.get_running_loop().run_in_executor(
-            subprocess_executor(), trust_grant_removal_blocked, name
-        )
-        if grant_blocked:
-            logger.warning(
-                "Uninstall of %s ABORTED: trust grant not removable (%s)",
-                name,
-                grant_blocked,
+            # Step 0: the execution grant must be removable before anything is
+            # destroyed. A grant is keyed on the app NAME alone, so one left behind
+            # admits a DIFFERENT app later installed under this name — code execution
+            # with no consent prompt. Checking it inside uninstall_app (Step 5)
+            # instead would make it unreachable as an abort: by then the cron
+            # manifest, the onUninstall script, the backend and the dependencies have
+            # all already been torn down, so the refusal strands a half-removed app
+            # and every retry re-runs the non-idempotent script. Asking here keeps the
+            # refusal free and the retry safe, exactly like the cron precondition.
+            # Offloaded: the precondition reads config.json and config.local.json from
+            # disk, and this is an async handler — the same reason `uninstall_app` below
+            # goes through the executor rather than being called inline.
+            grant_blocked = await asyncio.get_running_loop().run_in_executor(
+                subprocess_executor(), trust_grant_removal_blocked, name
             )
-            sel().log_api_access(
-                caller="dashboard",
-                operation="app_uninstall",
-                outcome="denied",
-                resources=f"app={name}",
-                error=f"trust grant not removable, uninstall aborted: {grant_blocked}",
-            )
-            return web.json_response(
-                {
-                    "error": (
-                        f"not uninstalling {name!r}: its third-party execution "
-                        f"grant could not be removed ({grant_blocked}). The grant "
-                        f"is keyed on the name, so removing the app while it "
-                        f"stands would let any future app installed under this "
-                        f"name run code without asking. Nothing has been changed "
-                        f"— clear the cause and retry."
-                    ),
-                    "code": "trust_grant_not_removed",
-                    "retryable": True,
-                    "app": name,
-                },
-                status=409,
-            )
-
-        # Step 1: Cron cleanup is the FIRST uninstall precondition, run BEFORE
-        # the (possibly destructive, non-idempotent) onUninstall script and
-        # BEFORE the backend is stopped. Uninstall is irreversible: below this
-        # point deregister_app() drops the per-app cron manifest and Step 5
-        # deletes the app directory. If owned jobs are still persisted and
-        # ENABLED at that moment they become permanent orphans — nothing
-        # remains that knows they belong to a removed app, and the scheduler
-        # keeps firing their command / script / agent payload indefinitely.
-        # So a contended store ABORTS the uninstall with a retryable 409 having
-        # changed NOTHING: no script run, no backend stopped, no manifest
-        # touched. Only then is the "app is still installed; retry" message
-        # literally true AND the retry safe — the non-idempotent onUninstall
-        # has not executed, so re-running the uninstall cannot double-apply a
-        # destructive teardown. "Durably disable the jobs instead" is not a
-        # fallback: disabling is itself a store mutation needing the very lock
-        # that is contended.
-        # Clean up app-declared cron jobs from the scheduler before the
-        # per-app cron manifest is removed by deregister_app(). Mirrors the
-        # cleanup that on_app_disable performs on the disable path, which keys
-        # on the app's cron PERMISSION and not on `resources`.
-        #
-        # `resources` does not gate this, for the same reason it does not gate
-        # the backend stop in Step 3: the field is app-written metadata, so
-        # gating teardown on it hands a trusted app a switch for its own
-        # cleanup. It also would not describe who owns these jobs even if it
-        # were trustworthy — an `app:<name>` job is persisted in the GATEWAY's
-        # cron store and fired by the gateway's own CronService, which applies
-        # no app-admission check at fire time. So a job left behind here runs
-        # its command / script / agent payload against a deleted app directory
-        # until the next gateway boot reconciles the store, and uninstall would
-        # otherwise clean up less than the strictly less destructive disable.
-        state = request.app.get("state")
-        cron_service = getattr(state, "crons", None) if state else None
-        if cron_service is not None:
-            try:
-                # deregister_app_crons_reporting_failures is async: it awaits the
-                # CronSDK mutation API (per-job store-lock spin offloaded to
-                # a worker thread), so the loop is never parked and timer
-                # arming is owned by CronService (no caller-side drain).
-                # It removes all owned jobs in ONE atomic transaction, so on any
-                # failure nothing was removed — the aborts below leave no
-                # partially-cleaned state.
-                removed = await _deregister_crons_with_retry(name, cron_service)
-                sel().log_api_access(
-                    caller="dashboard",
-                    operation="app_crons_deregister",
-                    outcome="completed",
-                    resources=f"app={name} removed={removed}",
-                )
-            except CronStoreBusy as exc:
+            if grant_blocked:
                 logger.warning(
-                    "Uninstall of %s ABORTED: cron cleanup could not "
-                    "complete (store busy) and continuing would orphan "
-                    "still-enabled app jobs: %s",
+                    "Uninstall of %s ABORTED: trust grant not removable (%s)",
                     name,
-                    exc,
+                    grant_blocked,
                 )
                 sel().log_api_access(
                     caller="dashboard",
                     operation="app_uninstall",
                     outcome="denied",
                     resources=f"app={name}",
-                    error=f"cron cleanup failed, uninstall aborted: {exc}",
+                    error=f"trust grant not removable, uninstall aborted: {grant_blocked}",
                 )
                 return web.json_response(
                     {
                         "error": (
-                            f"cron cleanup for {name!r} could not complete "
-                            "(cron store busy) — uninstall aborted so the "
-                            "app's scheduled jobs are not orphaned. The app is "
-                            "still installed; retry the uninstall."
+                            f"not uninstalling {name!r}: its third-party execution "
+                            f"grant could not be removed ({grant_blocked}). The grant "
+                            f"is keyed on the name, so removing the app while it "
+                            f"stands would let any future app installed under this "
+                            f"name run code without asking. Nothing has been changed "
+                            f"— clear the cause and retry."
                         ),
+                        "code": "trust_grant_not_removed",
                         "retryable": True,
                         "app": name,
-                        "log": uninstall_log,
-                    },
-                    status=409,
-                )
-            except CronStoreUnreadable as exc:
-                # Same abort as CronStoreBusy above, for the same reason: the
-                # owned-job set came back empty because the store could not be
-                # READ, not because the app owns nothing, so continuing would
-                # delete the app and leave its still-ENABLED jobs to resume.
-                # Reported NON-retryable, matching the contract in
-                # dashboard/handlers/cron.py: an unreadable file does not heal
-                # on its own, so a client that retries on busy must not retry
-                # here. The exception already names the one action that fixes
-                # it, so its message is surfaced verbatim.
-                logger.warning(
-                    "Uninstall of %s ABORTED: the cron store could not be read, "
-                    "so cleanup could not prove the app owns no enabled jobs: %s",
-                    name,
-                    exc,
-                )
-                sel().log_api_access(
-                    caller="dashboard",
-                    operation="app_uninstall",
-                    outcome="denied",
-                    resources=f"app={name}",
-                    error=f"cron store unreadable, uninstall aborted: {exc}",
-                )
-                return web.json_response(
-                    {
-                        "error": str(exc),
-                        "code": "cron_store_unreadable",
-                        "retryable": False,
-                        "app": name,
-                        "log": uninstall_log,
-                    },
-                    status=409,
-                )
-            except Exception as exc:
-                # Same abort as the two named store failures above, for the same
-                # reason. A removal that raised anything else did not persist, and
-                # the count cannot reveal that: the bridge's other entry point
-                # answers 0 for both "owned nothing" and "the write failed", and
-                # re-counting the rows cannot settle it either, because a failing
-                # save leaves them filtered out of the in-memory job list until a
-                # reload. So the exception is the only evidence there is, and
-                # continuing past it would run the non-idempotent onUninstall and
-                # delete the app while its still-ENABLED rows keep firing from
-                # disk until the next gateway boot reconciles them.
-                #
-                # Retryable, unlike the unreadable store: a write that failed on a
-                # full or briefly unavailable disk can succeed on a later attempt,
-                # and nothing destructive has run yet, so the retry is safe.
-                logger.warning(
-                    "Uninstall of %s ABORTED: cron cleanup failed and continuing "
-                    "would orphan still-enabled app jobs: %s",
-                    name,
-                    exc,
-                )
-                sel().log_api_access(
-                    caller="dashboard",
-                    operation="app_uninstall",
-                    outcome="denied",
-                    resources=f"app={name}",
-                    error=f"cron cleanup failed, uninstall aborted: {exc}",
-                )
-                return web.json_response(
-                    {
-                        "error": (
-                            f"cron cleanup for {name!r} could not complete ({exc}) "
-                            "— uninstall aborted so the app's scheduled jobs are "
-                            "not orphaned. The app is still installed; retry the "
-                            "uninstall."
-                        ),
-                        "code": "cron_cleanup_failed",
-                        "retryable": True,
-                        "app": name,
-                        "log": uninstall_log,
                     },
                     status=409,
                 )
 
-        # Step 2: Run onUninstall script. Reached only once cron cleanup has
-        # succeeded (or there were no crons / no cron service), so a
-        # non-idempotent teardown never runs on an uninstall that will be
-        # retried.
-        on_uninstall = (manifest.get("setup") or {}).get("onUninstall", "")
-        if on_uninstall:
-            script_output = await _run_lifecycle_script(
-                name,
-                on_uninstall,
-                timeout=120,
-                extra_env={
-                    "KEEP_DATA": "1" if keep_data else "0",
-                    "PURGE_DATA": "0" if keep_data else "1",
-                },
-                action="on_uninstall",
-            )
-            if script_output.get("output"):
-                from kiro_crew.security import redact_credentials, redact_exfiltration_urls
-
-                cleaned, _ = redact_exfiltration_urls(script_output["output"])
-                cleaned, _ = redact_credentials(cleaned)
-                uninstall_log.append(cleaned)
-            if script_output.get("failed"):
-                uninstall_log.append("onUninstall script failed (exit code non-zero)")
-
-        # Step 3: Stop the backend, then deregister gateway-managed resources.
-        #
-        # The stop runs for EVERY app; `resources` does not gate it. That field
-        # comes from the app's own installed metadata, so gating the stop on it
-        # hands a trusted app a switch for its own teardown: declare
-        # `resources: "app"` and the uninstall deletes the files while the backend
-        # keeps executing, holding its port, its app secret and its proxied
-        # routes. Deregistration still honors the field — an app that owns its
-        # agents, skills and crons must not have the gateway delete them — but the
-        # PROCESS is not the app's to keep. Same split `teardown_app_runtime`
-        # makes on disable and on trust withdrawal.
-        #
-        # A still-listening port is REPORTED, not made to abort. By here the
-        # non-idempotent onUninstall script has already run, so refusing would
-        # strand a half-removed app that no retry can finish cleanly, and an app
-        # that cannot be uninstalled is a worse outcome than one whose port is
-        # named as still in use. What must not happen is claiming a clean stop.
-        live_port, had_port_evidence = await _stop_backend_and_observe(name)
-        if live_port is not None:
-            logger.warning(
-                "backend for app %r is still listening on port %s after uninstall stop",
-                name,
-                live_port,
-            )
-            message = (
-                f"backend still listening on port {live_port} after the stop — the "
-                f"gateway stopped every process it was tracking, so this one is not "
-                f"ours to stop and it is still running"
-            )
-            # Recorded in BOTH fields because their consumers are disjoint, and a
-            # caller that sees neither is told a clean removal happened:
-            # ``print_result`` renders ``warnings`` and never ``uninstall_log``,
-            # while the dashboard's uninstall reads ``uninstall_log`` and never
-            # ``warnings``. Neither consumer shows it twice.
-            backend_warnings.append(message)
-            uninstall_log.append(message)
-        elif not had_port_evidence and bool((manifest.get("backend") or {}).get("entryPoint")):
-            # The probe answered "nothing observed", which is not "stopped". With no
-            # recorded port it had only the declared one to go on, and `onUninstall`
-            # has already run app-controlled code inside the app directory that
-            # declares it, so an untracked fixed-port backend could have relabelled
-            # the port it is holding. Saying nothing here is the false clean removal
-            # this step exists to prevent, and nothing later catches it: the files
-            # are gone and the stop dropped the pidfile record the next start would
-            # have reaped from.
+            # Step 0b: Invalidate the spawn-provenance record FIRST — before cron
+            # cleanup, the non-idempotent onUninstall, and the backend stop. The app is
+            # being removed, so its recovery row must not outlive it: a retained row
+            # still vouches for whatever rebinds the declared port, and a same-name
+            # reinstall within this same gateway lifetime (before the next-boot stale-reap
+            # would clear it) adopts a surviving member of the removed app's spawn tree as
+            # the new install's backend — the exact misattribution this whole change closes.
             #
-            # Gated on a backend being DECLARED, read from the installed record
-            # captured before the hook ran, so an app cannot suppress this by
-            # rewriting its manifest — and an app that never had a backend does not
-            # collect a warning about one.
-            message = (
-                f"could not verify {name}'s backend stopped — the gateway held no "
-                f"recorded port for it, so a listener it never tracked cannot be "
-                f"ruled out. Check for a process still bound to the port this app "
-                f"declared."
-            )
-            logger.warning("stop of app %r could not be verified: no recorded port", name)
-            backend_warnings.append(message)
-            uninstall_log.append(message)
-        if resources == "gateway":
-            await _deregister_app_off_loop(name)
-
-        # Step 4: Clean dependencies (atomic classify + ledger update)
-        cleaned_deps: list[str] = []
-        if not keep_dependencies:
-            deps_data = manifest.get("dependencies", {})
-            declared_deps = declared_capability_keys(deps_data)
-
-            # Normalize client-supplied keep ids: a dashboard session whose
-            # uninstall preview came from a pre-rename build echoes legacy keys,
-            # and classification emits canonical ones — comparing the two raw
-            # would drop the keep and delete a dep the user chose to keep.
-            keep_canonical = [canonical_dep_key(k) for k in keep_specific]
-            classification = classify_and_clean_for_uninstall(
-                name,
-                declared_deps,
-                keep_specific=keep_canonical,
-            )
-            removable = [
-                d for d in classification.get("removable", []) if d.get("id") not in keep_canonical
-            ]
-            if removable:
-                cleaned_deps = await clean_dependencies(name, removable)
-                if cleaned_deps:
-                    uninstall_log.append(f"Cleaned {len(cleaned_deps)} dependency(ies)")
-
-        # Step 5: Remove files. Off-loop: rmtree of a large installed tree is
-        # blocking filesystem I/O. (uninstall_app shares the
-        # ``.{name}-data-tmp`` move-aside path with install/update — covered
-        # by the lifecycle lock held above.)
-        #
-        # Held under the SHARED config lock because `uninstall_app` also runs
-        # `_drop_trust_grant`, which is a read-modify-write of `config.json`.
-        # `app_lifecycle_lock` is keyed on the APP name and so serializes nothing
-        # against a concurrent settings/agent write, which takes this lock and
-        # rewrites the same file: the two interleave into a lost update, either
-        # dropping the user's settings or restoring the grant we just removed —
-        # and a restored grant is a consent bypass for whatever is next installed
-        # Deferred, not top-level, and NOT because of a circular import — I checked,
-        # and hoisting it to module scope imports cleanly. The reason is layering:
-        # `apps` sits below `dashboard`, so a module-scope import here would make the
-        # app subsystem depend on a dashboard handler at LOAD time, in the one
-        # direction the package tree is meant to forbid. Deferring keeps that
-        # dependency at call time, where it is honest about being a shared-lock
-        # lookup rather than a structural one. This also matches how every other
-        # caller of this lock outside `dashboard/handlers` reaches it (see
-        # `mcp.py`, `messaging.py`, `core.py`, `computer_use.py`,
-        # `mcp_discover.py`) — the lock has no neutral home yet, and giving it one
-        # is a ~15-file refactor that does not belong in this change.
-        from kiro_crew.dashboard.handlers.agents import _get_config_lock
-
-        async with _get_config_lock():
-            result = await asyncio.get_running_loop().run_in_executor(
-                subprocess_executor(), lambda: uninstall_app(name, keep_data=keep_data)
-            )
-
-        # Step 6: drop the resume pointer of every conversation the app owned.
-        #
-        # INSIDE the lifecycle lock, and that is the point: this is a step of the
-        # uninstall, not an epilogue to it. Outside, a concurrent reinstall could
-        # take the lock the moment we release it and be serving the SAME slot key
-        # again while our scan is still running — and the pointer we then clear is
-        # the new installation's, not the dead one's. The lock is keyed on the app
-        # name, so it serializes exactly the reinstall that would collide.
-        #
-        # On success only: a failed uninstall leaves nothing changed, so a
-        # still-installed app keeps the pointers its slots are still entitled to
-        # resume. Not in `deregister_app` (Step 3) — that also runs on disable, and
-        # App Store Sync is a disable/enable pair.
-        #
-        # Enumerated AND cleared through the LIVE session map, never a throwaway
-        # `SessionMap`: this gateway holds a long-lived map whose `_data` loaded at
-        # startup and whose every write rewrites the whole file from that snapshot.
-        # Both halves follow from that one fact.
-        #
-        # Writing detached would be undone by the next unrelated mutation —
-        # restoring the very pointer just dropped — and would take whatever the live
-        # map had not flushed with it (`SessionMap`'s rule 3).
-        #
-        # READING detached is the same fact from the other side: the file lags this
-        # map by exactly what it has not flushed, so a detached enumeration can omit
-        # a key whose pointer already exists, and the clear then leaves that pointer
-        # for a reinstall to resume. `mapped_session_keys()` is the in-memory answer;
-        # `session_keys()` adds a key whose allocation is in flight and has not
-        # reached the map yet. Ownership still comes from the metadata line on disk,
-        # which is what survives a closed tab.
-        #
-        # `discard_conversation` tears the live session down, so a still-open tab of
-        # the uninstalled app cannot re-record a sid from the session it was holding.
-        #
-        # ONE pass, and the window it leaves is NAMED rather than narrowed. An
-        # allocation already reserved is inside `session_keys()`, so it is enumerated
-        # here. One that reserves after this pass is not, and no number of passes
-        # reaches it: closing that window means holding admission against this app's
-        # keys for the duration of the uninstall, and the only admission gate on the
-        # manager sets `_closing` PROCESS-WIDE — it would refuse turns for every app
-        # and every conversation while one app uninstalls, which is the larger harm.
-        # A per-key admission gate is a change to the allocation boundary, owned by
-        # whoever owns that boundary, not by this cleanup step. So the residual is
-        # stated here and in the description rather than half-closed by a retry loop
-        # that reads as though it were closed.
-        #
-        # The residual costs one stale pointer on one key of an app the user has
-        # already removed, and the next cold start under that key self-corrects as
-        # soon as the suppression flag is consumed.
-        if result.ok:
-            sessions = getattr(request.app.get("state"), "sessions", None)
-            if sessions is not None:
-                candidates = sessions.mapped_session_keys() | sessions.session_keys()
-                # Ownership reads each candidate's metadata line off disk; off the
-                # loop so a large history does not park the gateway.
-                owned = await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    functools.partial(app_conversation_keys, name, mapped_keys=candidates),
+            # It runs as the FIRST mutation precisely so a FAILED delete (ENOSPC/EDQUOT:
+            # the row stays on disk) ABORTS with a retryable 409 having changed nothing at
+            # all — no cron jobs deregistered, no onUninstall run, no files touched. It
+            # must precede cron cleanup specifically: cron cleanup PERSISTS the removal of
+            # the app's jobs, so a provenance refusal AFTER it would leave the installed
+            # app's scheduled jobs already deleted while the app stays installed. Ordering
+            # the confirmed-delete-or-abort first keeps every abort before the first
+            # persisted change. The handed-back row is RESTORED by the finally guard
+            # around the whole uninstall body on any exit that did not durably commit —
+            # a handled abort, an unexpected exception, or task cancellation / gateway
+            # kill in the window spanning cron cleanup, the 120s onUninstall and the stop
+            # — so no interruption strands an app whose provenance was already dropped.
+            try:
+                dropped_provenance_row = await asyncio.get_running_loop().run_in_executor(
+                    subprocess_executor(), forget_backend_provenance, name
                 )
-                for key in owned:
-                    try:
-                        # `replay=False`, not the default: dropping the sid stops the
-                        # NATIVE resume only. The transcript stays on disk by design,
-                        # so a cold start under this key would still have
-                        # `build_session_replay` inject the removed app's history into
-                        # the next installation's first turn — the same bug through a
-                        # second channel. The default `replay=True` actively DISCARDS
-                        # any standing suppression, so leaving it would be worse than
-                        # silent.
+            except PidfileDeleteFailed as exc:
+                logger.warning(
+                    "Uninstall of %s ABORTED: the spawn-provenance record could not be "
+                    "confirmed deleted (%s); continuing would let a same-name reinstall "
+                    "adopt a surviving backend. Nothing has been changed — retry.",
+                    name,
+                    exc,
+                )
+                sel().log_api_access(
+                    caller="dashboard",
+                    operation="app_uninstall",
+                    outcome="denied",
+                    resources=f"app={name}",
+                    error=f"provenance deletion failed, uninstall aborted: {exc}",
+                )
+                return web.json_response(
+                    {
+                        "error": (
+                            f"not uninstalling {name!r}: its spawn-provenance record "
+                            f"could not be deleted ({exc}). Removing the app while the "
+                            f"record stands would let a backend that survives the "
+                            f"uninstall be adopted by the next install of this name. "
+                            f"Nothing has been changed — clear the cause (usually a full "
+                            f"disk) and retry."
+                        ),
+                        "code": "provenance_not_deleted",
+                        "retryable": True,
+                        "app": name,
+                        "log": uninstall_log,
+                    },
+                    status=409,
+                )
+
+            async def _restore_provenance_on_abort() -> None:
+                """Put the Step-0b row back when the uninstall did not durably commit.
+
+                Called from the finally guard around the whole uninstall body, so it
+                covers every non-committing exit — a handled abort, an unexpected
+                exception, and task cancellation / gateway kill in the lethal window.
+                Idempotent setdefault via _restore_app_pid: a fresh spawn that recorded
+                its own identity meanwhile wins. Best-effort — a failed restore is no
+                worse than a tracked stop that could not restore, and the next-boot reap
+                still reconciles it.
+                """
+                if dropped_provenance_row is not None:
+                    await asyncio.get_running_loop().run_in_executor(
+                        subprocess_executor(),
+                        _restore_app_pid,
+                        name,
+                        dropped_provenance_row,
+                    )
+
+            # Step 1: Cron cleanup is the FIRST uninstall precondition, run BEFORE
+            # the (possibly destructive, non-idempotent) onUninstall script and
+            # BEFORE the backend is stopped. Uninstall is irreversible: below this
+            # point deregister_app() drops the per-app cron manifest and Step 5
+            # deletes the app directory. If owned jobs are still persisted and
+            # ENABLED at that moment they become permanent orphans — nothing
+            # remains that knows they belong to a removed app, and the scheduler
+            # keeps firing their command / script / agent payload indefinitely.
+            # So a contended store ABORTS the uninstall with a retryable 409 having
+            # changed NOTHING: no script run, no backend stopped, no manifest
+            # touched. Only then is the "app is still installed; retry" message
+            # literally true AND the retry safe — the non-idempotent onUninstall
+            # has not executed, so re-running the uninstall cannot double-apply a
+            # destructive teardown. "Durably disable the jobs instead" is not a
+            # fallback: disabling is itself a store mutation needing the very lock
+            # that is contended.
+            # Clean up app-declared cron jobs from the scheduler before the
+            # per-app cron manifest is removed by deregister_app(). Mirrors the
+            # cleanup that on_app_disable performs on the disable path, which keys
+            # on the app's cron PERMISSION and not on `resources`.
+            #
+            # `resources` does not gate this, for the same reason it does not gate
+            # the backend stop in Step 3: the field is app-written metadata, so
+            # gating teardown on it hands a trusted app a switch for its own
+            # cleanup. It also would not describe who owns these jobs even if it
+            # were trustworthy — an `app:<name>` job is persisted in the GATEWAY's
+            # cron store and fired by the gateway's own CronService, which applies
+            # no app-admission check at fire time. So a job left behind here runs
+            # its command / script / agent payload against a deleted app directory
+            # until the next gateway boot reconciles the store, and uninstall would
+            # otherwise clean up less than the strictly less destructive disable.
+            state = request.app.get("state")
+            cron_service = getattr(state, "crons", None) if state else None
+            if cron_service is not None:
+                try:
+                    # deregister_app_crons_reporting_failures is async: it awaits the
+                    # CronSDK mutation API (per-job store-lock spin offloaded to
+                    # a worker thread), so the loop is never parked and timer
+                    # arming is owned by CronService (no caller-side drain).
+                    # It removes all owned jobs in ONE atomic transaction, so on any
+                    # failure nothing was removed — the aborts below leave no
+                    # partially-cleaned state.
+                    removed = await _deregister_crons_with_retry(name, cron_service)
+                    sel().log_api_access(
+                        caller="dashboard",
+                        operation="app_crons_deregister",
+                        outcome="completed",
+                        resources=f"app={name} removed={removed}",
+                    )
+                except CronStoreBusy as exc:
+                    logger.warning(
+                        "Uninstall of %s ABORTED: cron cleanup could not "
+                        "complete (store busy) and continuing would orphan "
+                        "still-enabled app jobs: %s",
+                        name,
+                        exc,
+                    )
+                    sel().log_api_access(
+                        caller="dashboard",
+                        operation="app_uninstall",
+                        outcome="denied",
+                        resources=f"app={name}",
+                        error=f"cron cleanup failed, uninstall aborted: {exc}",
+                    )
+                    # Step 0b dropped the provenance row before this abort; the
+                    # try/finally around the whole uninstall body restores it (the
+                    # uninstall never committed), so no explicit restore is needed here.
+                    return web.json_response(
+                        {
+                            "error": (
+                                f"cron cleanup for {name!r} could not complete "
+                                "(cron store busy) — uninstall aborted so the "
+                                "app's scheduled jobs are not orphaned. The app is "
+                                "still installed; retry the uninstall."
+                            ),
+                            "retryable": True,
+                            "app": name,
+                            "log": uninstall_log,
+                        },
+                        status=409,
+                    )
+                except CronStoreUnreadable as exc:
+                    # Same abort as CronStoreBusy above, for the same reason: the
+                    # owned-job set came back empty because the store could not be
+                    # READ, not because the app owns nothing, so continuing would
+                    # delete the app and leave its still-ENABLED jobs to resume.
+                    # Reported NON-retryable, matching the contract in
+                    # dashboard/handlers/cron.py: an unreadable file does not heal
+                    # on its own, so a client that retries on busy must not retry
+                    # here. The exception already names the one action that fixes
+                    # it, so its message is surfaced verbatim.
+                    logger.warning(
+                        "Uninstall of %s ABORTED: the cron store could not be read, "
+                        "so cleanup could not prove the app owns no enabled jobs: %s",
+                        name,
+                        exc,
+                    )
+                    sel().log_api_access(
+                        caller="dashboard",
+                        operation="app_uninstall",
+                        outcome="denied",
+                        resources=f"app={name}",
+                        error=f"cron store unreadable, uninstall aborted: {exc}",
+                    )
+                    # Step 0b dropped the provenance row before this abort; the
+                    # try/finally around the uninstall body restores it.
+                    return web.json_response(
+                        {
+                            "error": str(exc),
+                            "code": "cron_store_unreadable",
+                            "retryable": False,
+                            "app": name,
+                            "log": uninstall_log,
+                        },
+                        status=409,
+                    )
+                except Exception as exc:
+                    # Same abort as the two named store failures above, for the same
+                    # reason. A removal that raised anything else did not persist, and
+                    # the count cannot reveal that: the bridge's other entry point
+                    # answers 0 for both "owned nothing" and "the write failed", and
+                    # re-counting the rows cannot settle it either, because a failing
+                    # save leaves them filtered out of the in-memory job list until a
+                    # reload. So the exception is the only evidence there is, and
+                    # continuing past it would run the non-idempotent onUninstall and
+                    # delete the app while its still-ENABLED rows keep firing from
+                    # disk until the next gateway boot reconciles them.
+                    #
+                    # Retryable, unlike the unreadable store: a write that failed on a
+                    # full or briefly unavailable disk can succeed on a later attempt,
+                    # and nothing destructive has run yet, so the retry is safe.
+                    logger.warning(
+                        "Uninstall of %s ABORTED: cron cleanup failed and continuing "
+                        "would orphan still-enabled app jobs: %s",
+                        name,
+                        exc,
+                    )
+                    sel().log_api_access(
+                        caller="dashboard",
+                        operation="app_uninstall",
+                        outcome="denied",
+                        resources=f"app={name}",
+                        error=f"cron cleanup failed, uninstall aborted: {exc}",
+                    )
+                    # Step 0b dropped the provenance row before this abort; the
+                    # try/finally around the uninstall body restores it.
+                    return web.json_response(
+                        {
+                            "error": (
+                                f"cron cleanup for {name!r} could not complete ({exc}) "
+                                "— uninstall aborted so the app's scheduled jobs are "
+                                "not orphaned. The app is still installed; retry the "
+                                "uninstall."
+                            ),
+                            "code": "cron_cleanup_failed",
+                            "retryable": True,
+                            "app": name,
+                            "log": uninstall_log,
+                        },
+                        status=409,
+                    )
+
+            # Step 2: Run onUninstall script. Reached only once cron cleanup has
+            # succeeded (or there were no crons / no cron service), so a
+            # non-idempotent teardown never runs on an uninstall that will be
+            # retried.
+            on_uninstall = (manifest.get("setup") or {}).get("onUninstall", "")
+            if on_uninstall:
+                script_output = await _run_lifecycle_script(
+                    name,
+                    on_uninstall,
+                    timeout=120,
+                    extra_env={
+                        "KEEP_DATA": "1" if keep_data else "0",
+                        "PURGE_DATA": "0" if keep_data else "1",
+                    },
+                    action="on_uninstall",
+                )
+                if script_output.get("output"):
+                    from kiro_crew.security import redact_credentials, redact_exfiltration_urls
+
+                    cleaned, _ = redact_exfiltration_urls(script_output["output"])
+                    cleaned, _ = redact_credentials(cleaned)
+                    uninstall_log.append(cleaned)
+                if script_output.get("failed"):
+                    uninstall_log.append("onUninstall script failed (exit code non-zero)")
+
+            # Step 3: Stop the backend, then deregister gateway-managed resources.
+            #
+            # The stop runs for EVERY app; `resources` does not gate it. That field
+            # comes from the app's own installed metadata, so gating the stop on it
+            # hands a trusted app a switch for its own teardown: declare
+            # `resources: "app"` and the uninstall deletes the files while the backend
+            # keeps executing, holding its port, its app secret and its proxied
+            # routes. Deregistration still honors the field — an app that owns its
+            # agents, skills and crons must not have the gateway delete them — but the
+            # PROCESS is not the app's to keep. Same split `teardown_app_runtime`
+            # makes on disable and on trust withdrawal.
+            #
+            # A still-listening port is REPORTED, not made to abort. By here the
+            # non-idempotent onUninstall script has already run, so refusing would
+            # strand a half-removed app that no retry can finish cleanly, and an app
+            # that cannot be uninstalled is a worse outcome than one whose port is
+            # named as still in use. What must not happen is claiming a clean stop.
+            live_port, had_port_evidence = await _stop_backend_and_observe(name)
+            if live_port is not None:
+                logger.warning(
+                    "backend for app %r is still listening on port %s after uninstall stop",
+                    name,
+                    live_port,
+                )
+                message = (
+                    f"backend still listening on port {live_port} after the stop — the "
+                    f"gateway stopped every process it was tracking, so this one is not "
+                    f"ours to stop and it is still running"
+                )
+                # Recorded in BOTH fields because their consumers are disjoint, and a
+                # caller that sees neither is told a clean removal happened:
+                # ``print_result`` renders ``warnings`` and never ``uninstall_log``,
+                # while the dashboard's uninstall reads ``uninstall_log`` and never
+                # ``warnings``. Neither consumer shows it twice.
+                backend_warnings.append(message)
+                uninstall_log.append(message)
+            elif not had_port_evidence and bool((manifest.get("backend") or {}).get("entryPoint")):
+                # The probe answered "nothing observed", which is not "stopped". With no
+                # recorded port it had only the declared one to go on, and `onUninstall`
+                # has already run app-controlled code inside the app directory that
+                # declares it, so an untracked fixed-port backend could have relabelled
+                # the port it is holding. Saying nothing here is the false clean removal
+                # this step exists to prevent, and nothing later catches it: the files
+                # are gone and the stop dropped the pidfile record the next start would
+                # have reaped from.
+                #
+                # Gated on a backend being DECLARED, read from the installed record
+                # captured before the hook ran, so an app cannot suppress this by
+                # rewriting its manifest — and an app that never had a backend does not
+                # collect a warning about one.
+                message = (
+                    f"could not verify {name}'s backend stopped — the gateway held no "
+                    f"recorded port for it, so a listener it never tracked cannot be "
+                    f"ruled out. Check for a process still bound to the port this app "
+                    f"declared."
+                )
+                logger.warning("stop of app %r could not be verified: no recorded port", name)
+                backend_warnings.append(message)
+                uninstall_log.append(message)
+            if resources == "gateway":
+                await _deregister_app_off_loop(name)
+
+            # Step 4: Clean dependencies (atomic classify + ledger update)
+            cleaned_deps: list[str] = []
+            if not keep_dependencies:
+                deps_data = manifest.get("dependencies", {})
+                declared_deps = declared_capability_keys(deps_data)
+
+                # Normalize client-supplied keep ids: a dashboard session whose
+                # uninstall preview came from a pre-rename build echoes legacy keys,
+                # and classification emits canonical ones — comparing the two raw
+                # would drop the keep and delete a dep the user chose to keep.
+                keep_canonical = [canonical_dep_key(k) for k in keep_specific]
+                classification = classify_and_clean_for_uninstall(
+                    name,
+                    declared_deps,
+                    keep_specific=keep_canonical,
+                )
+                removable = [
+                    d
+                    for d in classification.get("removable", [])
+                    if d.get("id") not in keep_canonical
+                ]
+                if removable:
+                    cleaned_deps = await clean_dependencies(name, removable)
+                    if cleaned_deps:
+                        uninstall_log.append(f"Cleaned {len(cleaned_deps)} dependency(ies)")
+
+            # Step 5: Remove files. Off-loop: rmtree of a large installed tree is
+            # blocking filesystem I/O. (uninstall_app shares the
+            # ``.{name}-data-tmp`` move-aside path with install/update — covered
+            # by the lifecycle lock held above.)
+            #
+            # Held under the SHARED config lock because `uninstall_app` also runs
+            # `_drop_trust_grant`, which is a read-modify-write of `config.json`.
+            # `app_lifecycle_lock` is keyed on the APP name and so serializes nothing
+            # against a concurrent settings/agent write, which takes this lock and
+            # rewrites the same file: the two interleave into a lost update, either
+            # dropping the user's settings or restoring the grant we just removed —
+            # and a restored grant is a consent bypass for whatever is next installed
+            # Deferred, not top-level, and NOT because of a circular import — I checked,
+            # and hoisting it to module scope imports cleanly. The reason is layering:
+            # `apps` sits below `dashboard`, so a module-scope import here would make the
+            # app subsystem depend on a dashboard handler at LOAD time, in the one
+            # direction the package tree is meant to forbid. Deferring keeps that
+            # dependency at call time, where it is honest about being a shared-lock
+            # lookup rather than a structural one. This also matches how every other
+            # caller of this lock outside `dashboard/handlers` reaches it (see
+            # `mcp.py`, `messaging.py`, `core.py`, `computer_use.py`,
+            # `mcp_discover.py`) — the lock has no neutral home yet, and giving it one
+            # is a ~15-file refactor that does not belong in this change.
+            from kiro_crew.dashboard.handlers.agents import _get_config_lock
+
+            async with _get_config_lock():
+                result = await asyncio.get_running_loop().run_in_executor(
+                    subprocess_executor(), lambda: uninstall_app(name, keep_data=keep_data)
+                )
+            if result.ok:
+                # The app's files are durably removed — the uninstall has COMMITTED,
+                # so the Step-0b provenance drop is now permanent and the finally must
+                # NOT restore it. A failed removal (result.ok False) leaves the app
+                # installed, so the flag stays False and the finally puts the row back.
+                provenance_committed = True
+
+            # Step 6: drop the resume pointer of every conversation the app owned.
+            #
+            # INSIDE the lifecycle lock, and that is the point: this is a step of the
+            # uninstall, not an epilogue to it. Outside, a concurrent reinstall could
+            # take the lock the moment we release it and be serving the SAME slot key
+            # again while our scan is still running — and the pointer we then clear is
+            # the new installation's, not the dead one's. The lock is keyed on the app
+            # name, so it serializes exactly the reinstall that would collide.
+            #
+            # On success only: a failed uninstall leaves nothing changed, so a
+            # still-installed app keeps the pointers its slots are still entitled to
+            # resume. Not in `deregister_app` (Step 3) — that also runs on disable, and
+            # App Store Sync is a disable/enable pair.
+            #
+            # Enumerated AND cleared through the LIVE session map, never a throwaway
+            # `SessionMap`: this gateway holds a long-lived map whose `_data` loaded at
+            # startup and whose every write rewrites the whole file from that snapshot.
+            # Both halves follow from that one fact.
+            #
+            # Writing detached would be undone by the next unrelated mutation —
+            # restoring the very pointer just dropped — and would take whatever the live
+            # map had not flushed with it (`SessionMap`'s rule 3).
+            #
+            # READING detached is the same fact from the other side: the file lags this
+            # map by exactly what it has not flushed, so a detached enumeration can omit
+            # a key whose pointer already exists, and the clear then leaves that pointer
+            # for a reinstall to resume. `mapped_session_keys()` is the in-memory answer;
+            # `session_keys()` adds a key whose allocation is in flight and has not
+            # reached the map yet. Ownership still comes from the metadata line on disk,
+            # which is what survives a closed tab.
+            #
+            # `discard_conversation` tears the live session down, so a still-open tab of
+            # the uninstalled app cannot re-record a sid from the session it was holding.
+            #
+            # ONE pass, and the window it leaves is NAMED rather than narrowed. An
+            # allocation already reserved is inside `session_keys()`, so it is enumerated
+            # here. One that reserves after this pass is not, and no number of passes
+            # reaches it: closing that window means holding admission against this app's
+            # keys for the duration of the uninstall, and the only admission gate on the
+            # manager sets `_closing` PROCESS-WIDE — it would refuse turns for every app
+            # and every conversation while one app uninstalls, which is the larger harm.
+            # A per-key admission gate is a change to the allocation boundary, owned by
+            # whoever owns that boundary, not by this cleanup step. So the residual is
+            # stated here and in the description rather than half-closed by a retry loop
+            # that reads as though it were closed.
+            #
+            # The residual costs one stale pointer on one key of an app the user has
+            # already removed, and the next cold start under that key self-corrects as
+            # soon as the suppression flag is consumed.
+            if result.ok:
+                sessions = getattr(request.app.get("state"), "sessions", None)
+                if sessions is not None:
+                    candidates = sessions.mapped_session_keys() | sessions.session_keys()
+                    # Ownership reads each candidate's metadata line off disk; off the
+                    # loop so a large history does not park the gateway.
+                    owned = await asyncio.get_running_loop().run_in_executor(
+                        None,
+                        functools.partial(app_conversation_keys, name, mapped_keys=candidates),
+                    )
+                    for key in owned:
                         try:
-                            await sessions.discard_conversation(key, replay=False)
-                        finally:
-                            # The sid is already gone by the time anything in there can
-                            # raise: `discard_conversation` clears it and sets the
-                            # in-memory flag inside its registry lock, and only THEN
-                            # awaits `provider.shutdown()`, which its own `finally`
-                            # deliberately lets propagate. Skipping this on that path
-                            # leaves the suppression memory-only, so a restart before
-                            # the reinstall replays the removed app's transcript into
-                            # the new installation's first turn — the bug this step
-                            # exists to prevent, reached through the failure path.
-                            #
-                            # Persistently at all, because the flag `replay=False` sets
-                            # lives in this process's memory: a gateway restart between
-                            # the uninstall and the reinstall would lose it.
-                            sessions.suppress_replay_persistently(key)
-                        dropped += 1
-                    except Exception:  # noqa: BLE001 — bookkeeping must not fail an uninstall
-                        logger.warning(
-                            "could not drop the resume pointer for %r", key, exc_info=True
-                        )
-                if owned:
-                    # `owned`, not `dropped`: a key whose teardown raised still had its
-                    # suppression flag written by the `finally` above, and that write is
-                    # only worth anything once it reaches disk.
-                    #
-                    # Durable BEFORE the uninstall reports success, which is the same
-                    # invariant the CLI path states as `flush()` before releasing the
-                    # lock. `clear_sid` on the loop only SCHEDULES a debounced flush,
-                    # so without this the handler answers 200 while the dropped
-                    # pointer is still only in memory — and a restart inside that
-                    # window brings the stale sid back with the app already gone.
-                    #
-                    # Wrapped for the same reason the per-key body above is: by the
-                    # time this runs `uninstall_app` has already removed the app's
-                    # files, so the uninstall is past being retried as a whole. An
-                    # ENOSPC or a permission error here would raise straight out of
-                    # the handler and skip `invalidate_app_secret_cache`,
-                    # `_unregister_notification_channels` and `forget_app_hooks` --
-                    # and a surviving slot-close hook makes the removed app's
-                    # leftover tabs UNDISMISSABLE, which costs the user more than
-                    # the pointer this write failed to persist. The CLI sibling
-                    # states the same rule as `SessionPointerCleanup(failed=True)`.
-                    try:
-                        await sessions.aflush()
-                    except Exception:  # noqa: BLE001 -- bookkeeping must not fail an uninstall
-                        pointer_flush_failed = True
-                        logger.warning(
-                            "could not persist %r's dropped resume pointer(s)",
-                            name,
-                            exc_info=True,
-                        )
+                            # `replay=False`, not the default: dropping the sid stops the
+                            # NATIVE resume only. The transcript stays on disk by design,
+                            # so a cold start under this key would still have
+                            # `build_session_replay` inject the removed app's history into
+                            # the next installation's first turn — the same bug through a
+                            # second channel. The default `replay=True` actively DISCARDS
+                            # any standing suppression, so leaving it would be worse than
+                            # silent.
+                            try:
+                                await sessions.discard_conversation(key, replay=False)
+                            finally:
+                                # The sid is already gone by the time anything in there can
+                                # raise: `discard_conversation` clears it and sets the
+                                # in-memory flag inside its registry lock, and only THEN
+                                # awaits `provider.shutdown()`, which its own `finally`
+                                # deliberately lets propagate. Skipping this on that path
+                                # leaves the suppression memory-only, so a restart before
+                                # the reinstall replays the removed app's transcript into
+                                # the new installation's first turn — the bug this step
+                                # exists to prevent, reached through the failure path.
+                                #
+                                # Persistently at all, because the flag `replay=False` sets
+                                # lives in this process's memory: a gateway restart between
+                                # the uninstall and the reinstall would lose it.
+                                sessions.suppress_replay_persistently(key)
+                            dropped += 1
+                        except Exception:  # noqa: BLE001 — bookkeeping must not fail an uninstall
+                            logger.warning(
+                                "could not drop the resume pointer for %r", key, exc_info=True
+                            )
+                    if owned:
+                        # `owned`, not `dropped`: a key whose teardown raised still had its
+                        # suppression flag written by the `finally` above, and that write is
+                        # only worth anything once it reaches disk.
+                        #
+                        # Durable BEFORE the uninstall reports success, which is the same
+                        # invariant the CLI path states as `flush()` before releasing the
+                        # lock. `clear_sid` on the loop only SCHEDULES a debounced flush,
+                        # so without this the handler answers 200 while the dropped
+                        # pointer is still only in memory — and a restart inside that
+                        # window brings the stale sid back with the app already gone.
+                        #
+                        # Wrapped for the same reason the per-key body above is: by the
+                        # time this runs `uninstall_app` has already removed the app's
+                        # files, so the uninstall is past being retried as a whole. An
+                        # ENOSPC or a permission error here would raise straight out of
+                        # the handler and skip `invalidate_app_secret_cache`,
+                        # `_unregister_notification_channels` and `forget_app_hooks` --
+                        # and a surviving slot-close hook makes the removed app's
+                        # leftover tabs UNDISMISSABLE, which costs the user more than
+                        # the pointer this write failed to persist. The CLI sibling
+                        # states the same rule as `SessionPointerCleanup(failed=True)`.
+                        try:
+                            await sessions.aflush()
+                        except Exception:  # noqa: BLE001 -- bookkeeping must not fail an uninstall
+                            pointer_flush_failed = True
+                            logger.warning(
+                                "could not persist %r's dropped resume pointer(s)",
+                                name,
+                                exc_info=True,
+                            )
 
-            # Step 7: remove the clone. Off-loop like Step 5 (a git tree), and INSIDE
-            # the lock held since Step 2: a second acquisition queues behind a parked
-            # install and would delete the tree that install just re-cloned. PR body.
-            if is_registry_source(info.get("source", "")):
-                app_reg_name = registry_name_from_source(info.get("source", ""))
-                if app_reg_name:
-                    from kiro_crew.apps.registry import app_source_dir
+                # Step 7: remove the clone. Off-loop like Step 5 (a git tree), and INSIDE
+                # the lock held since Step 2: a second acquisition queues behind a parked
+                # install and would delete the tree that install just re-cloned. PR body.
+                if is_registry_source(info.get("source", "")):
+                    app_reg_name = registry_name_from_source(info.get("source", ""))
+                    if app_reg_name:
+                        from kiro_crew.apps.registry import app_source_dir
 
-                    ws_dir = app_source_dir(app_reg_name)
-                    if ws_dir.is_dir():
-                        await asyncio.to_thread(shutil.rmtree, ws_dir, ignore_errors=True)
-                        uninstall_log.append(f"Removed workspace for {app_reg_name}")
+                        ws_dir = app_source_dir(app_reg_name)
+                        if ws_dir.is_dir():
+                            await asyncio.to_thread(shutil.rmtree, ws_dir, ignore_errors=True)
+                            uninstall_log.append(f"Removed workspace for {app_reg_name}")
+    finally:
+        if dropped_provenance_row is not None and not provenance_committed:
+            # Any exit without a durable commit (handled abort, unexpected
+            # exception, or cancellation/gateway-kill) restores the row so a still-
+            # installed app keeps the record that attributes its own backend.
+            await _restore_provenance_on_abort()
     if not result.ok:
+        # Step 5 (uninstall_app) failed and restored the app's files, so the app is
+        # still installed. provenance_committed stayed False, so the finally above
+        # already put the Step-0b row back — nothing to restore here.
         sel().log_api_access(
             caller="dashboard",
             operation="app_uninstall",
