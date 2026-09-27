@@ -53,7 +53,7 @@ import { sendTurn } from '../chat-core/transport/sendTurn'
 import { applySteerReceipt } from '../chat-core/transport/steerReceipt'
 import { useSelectionQuoteAsk } from '../chat-core/composer/selectionActions'
 import { addNotification, removeNotificationByTs } from '../store/notificationsSlice'
-import { onTerminalReady, sendToTerminalSession, sendRawToTerminalSession, getTerminalShell, getTerminalFenceShells } from '../utils/terminalRegistry'
+import { onTerminalReady, sendToTerminalSession, sendRawToTerminalSession, getTerminalShell, getTerminalFenceShells, getTerminalInputWs } from '../utils/terminalRegistry'
 import { runInTerminalText, RUN_IN_TERMINAL_READY_DEADLINE_MS, RUN_IN_TERMINAL_OPENING_GRACE_MS } from '../utils/fenceShell'
 import { addTab as addDockTerminal, removeTab as removeDockTerminal, hasTab as hasDockTerminal } from '../hooks/useBottomTerminal'
 import { isPopoutOpen as isTerminalPopoutOpen } from '../utils/terminalPopout'
@@ -4336,6 +4336,20 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
           code, lang, getTerminalShell(sessionId), getTerminalFenceShells(sessionId),
         )
         emit(sendToTerminalSession(sessionId, text))
+      }, () => {
+        if (settled) return
+        // Local disposal removes the socket before notifying failure, but the
+        // tab-close caller removes the tab afterwards. Socket ownership here
+        // distinguishes that release from an error on an upgraded connection;
+        // it says nothing about whether the shell is alive.
+        const ownsSocket = Boolean(getTerminalInputWs(sessionId))
+        emit(false)
+        if (!ownsSocket) return
+        queueMicrotask(() => {
+          // Let synchronous tab close / popout transfer finish before reporting.
+          if (!hasDockTerminal(sessionId) || isTerminalPopoutOpen()) return
+          showActionError(i18nT('pages.chatPage.run_in_terminal_liveness_probe_failed_error'))
+        })
       })
       // Give the PTY time to connect. A missing `ready` frame is not enough to
       // prove the dispatch died because a shell profile can replace the
@@ -8993,6 +9007,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               // seed -- so it is the signal that arms the prefill hint's expiry.
               onChange={composerUserEdit}
               onSend={() => send()}
+              terminalCommands={activeSlot && !currentSlot ? 'pending' : currentSlot?.executor === 'remote' ? 'remote' : 'local'}
               canSteer={composerBusy}
               onSteer={steer}
               // AND a turn actually running. `composerBusy` is also true when only

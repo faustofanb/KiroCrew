@@ -19,6 +19,10 @@ const defaultProps = {
   onSend: vi.fn(),
 }
 
+// ChatInput's engine loads LexicalComposerInput through React.lazy. Wait for that
+// chunk to mount before asserting editor state, including on busy test workers.
+const LEXICAL_READY = { timeout: 5000 }
+
 describe('ChatInput Lexical migration seam', () => {
   it('keeps the established textarea path as the default', () => {
     renderWithProviders(<ChatInput {...defaultProps} />)
@@ -37,7 +41,7 @@ describe('ChatInput Lexical migration seam', () => {
         lexicalComposer
       />,
     )
-    const chip = await screen.findByTestId('paste-token-1')
+    const chip = await screen.findByTestId('paste-token-1', undefined, LEXICAL_READY)
     expect(chip).toHaveTextContent('Paste #1 · 3 lines')
     expect(chip).not.toHaveTextContent('[ Paste')
     const input = screen.getByRole('textbox')
@@ -49,7 +53,7 @@ describe('ChatInput Lexical migration seam', () => {
     const { rerender } = renderWithProviders(
       <ChatInput {...defaultProps} lexicalComposer autoFocusKey="A" />,
     )
-    const input = await screen.findByRole('textbox')
+    const input = await screen.findByRole('textbox', undefined, LEXICAL_READY)
     await waitFor(() => expect(input).toHaveFocus())
     input.blur()
     rerender(<ChatInput {...defaultProps} lexicalComposer autoFocusKey="B" />)
@@ -73,6 +77,7 @@ describe('ChatInput Lexical migration seam', () => {
         />
       </ComposerVoiceSliceOverride>,
     )
+    await screen.findByRole('textbox', undefined, LEXICAL_READY)
     await waitFor(() => expect(pendingRef.current).toBeNull())
     await waitFor(() => expect(caretRef.current).toEqual({ start: 3, end: 3 }))
   })
@@ -81,7 +86,7 @@ describe('ChatInput Lexical migration seam', () => {
     const { rerender } = renderWithProviders(
       <ChatInput {...defaultProps} value="kept draft" lexicalComposer />,
     )
-    expect(await screen.findByRole('textbox')).toHaveAttribute('data-lexical-composer')
+    expect(await screen.findByRole('textbox', undefined, LEXICAL_READY)).toHaveAttribute('data-lexical-composer')
     rerender(<ChatInput {...defaultProps} value="kept draft" lexicalComposer={false} />)
     const textarea = screen.getByRole('textbox')
     expect(textarea.tagName).toBe('TEXTAREA')

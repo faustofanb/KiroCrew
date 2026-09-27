@@ -39,6 +39,7 @@ import sys
 import tempfile
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -55,9 +56,7 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX launcher 
 #: A LINK at a protected name can only be pinned no-follow with ``O_PATH``, which
 #: only Linux has; elsewhere the pin refuses it outright (asserted below), so the
 #: cases whose subject IS a tolerated link exercise Linux behaviour only. The
-#: private-window walk opens every component with ``os.O_PATH`` outright, so a case
-#: that binds a window is Linux-only too. The namespace launcher itself runs nowhere
-#: else.
+#: namespace launcher itself runs nowhere else.
 _LINUX_LINK_PIN = pytest.mark.skipif(
     not sys.platform.startswith("linux"),
     reason="pinning a link no-follow needs O_PATH; the namespace launcher is Linux-only",
@@ -269,6 +268,7 @@ def _run(
     occupants: dict[str, list[int]] | None = None,
     globals_out: dict | None = None,
     private_dirs: tuple[str, ...] = (),
+    os_shim: SimpleNamespace | None = None,
 ) -> tuple[_FakeLibc, _Bed, str | None]:
     """Run the extracted region. Returns ``(fake_libc, bed, refusal_or_None)``.
 
@@ -309,7 +309,7 @@ def _run(
         "_MS_NOEXEC": 8,
         "_MNT_DETACH": 2,
         "ctypes": ctypes,
-        "os": os,
+        "os": os if os_shim is None else os_shim,
         "stat": stat,
         "sys": sys,
         "tempfile": tempfile_shim or tempfile,
@@ -1159,8 +1159,24 @@ def test_the_directory_loop_records_every_name_it_masks(tmp_path: Path) -> None:
         assert stand_in_id in region["_OWN_STAND_INS"], name
 
 
-@_LINUX_LINK_PIN
-def test_the_directory_loop_records_every_window_it_binds(tmp_path: Path) -> None:
+@pytest.fixture(params=("native", "without-o-path"))
+def directory_descriptor_os(request: pytest.FixtureRequest) -> SimpleNamespace:
+    """Keep real directory descriptors without requiring Linux's permission semantics.
+
+    These fixture directories are readable, so O_RDONLY supports the same no-follow,
+    directory-relative walk and fstat identity checks. Only the extracted region sees
+    the fallback; the process-wide os module must retain its real capabilities.
+    """
+    attributes = vars(os).copy()
+    if request.param == "without-o-path":
+        attributes.pop("O_PATH", None)
+    attributes.setdefault("O_PATH", os.O_RDONLY)
+    return SimpleNamespace(**attributes)
+
+
+def test_the_directory_loop_records_every_window_it_binds(
+    tmp_path: Path, directory_descriptor_os: SimpleNamespace
+) -> None:
     """The walk's stop condition is written by the loop, for each window it mounts back.
 
     A window the loop binds but does not record leaves every leaf under it reading
@@ -1170,7 +1186,13 @@ def test_the_directory_loop_records_every_window_it_binds(tmp_path: Path) -> Non
     window = bed.aws / "sso"
     window.mkdir()
     region: dict = {}
-    _, _, refusal = _run(tmp_path, bed=bed, globals_out=region, private_dirs=(str(window),))
+    _, _, refusal = _run(
+        tmp_path,
+        bed=bed,
+        globals_out=region,
+        private_dirs=(str(window),),
+        os_shim=directory_descriptor_os,
+    )
     assert refusal is None, refusal
     assert region["_BOUND_WINDOWS"] == {str(window)}, "the bound window was not recorded"
     assert str(bed.aws) in region["_MASKED_NAMES"], "the window's mask root was not recorded"

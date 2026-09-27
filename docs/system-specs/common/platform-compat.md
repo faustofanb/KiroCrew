@@ -514,5 +514,14 @@ id in `test/macos-expected-failures.txt`, the burn-down list applied by the
 rootdir `conftest.py`, same mechanism as `windows-expected-failures.txt`. Never
 widen a platform assertion to make a red go away.
 
+The private-window loop recording test in `test_sandbox_mount_pinned_target.py`
+replays the extracted launcher region on Linux and macOS with real directory
+descriptors and mocked mounts. Its test-local OS namespace uses native `O_PATH`
+when available and `O_RDONLY` otherwise: the fixture directories are readable,
+and the no-follow, directory-relative opens and `fstat` identity checks stay
+real. Both native and absent-`O_PATH` fixture cases retain every assertion,
+including the exact bound-window set. The fixture leaves the process-wide `os`
+module unchanged; it does not model `O_PATH` access to unreadable directories.
+
 Frontend support is Chrome, Firefox, Safari and Edge, using standard Web APIs and
 guarding the rest (`typeof Notification !== 'undefined'`).
