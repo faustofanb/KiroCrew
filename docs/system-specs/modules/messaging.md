@@ -4147,6 +4147,96 @@ reported with its position rather than assumed delivered. This matters because
 `drive_turn` persists the full text, so a silent truncation would leave history and
 delivery disagreeing about what the user was told.
 
+**A credential may not straddle a bubble ROTATION seam either.** An answer that
+outruns a bubble's ~10-minute lifetime is rotated: the current bubble is SEALED
+(frozen, never rewritable) and the answer continues in a fresh one. Each bubble is
+redacted on its own slice in `_render_slice`, so a credential whose head sits in the
+sealed bubble and whose completion opens the continuation matches neither bubble's
+scan, and the reader's client renders the two side by side and rejoins the key.
+`_push` therefore grades the continuation's head against what the frozen prior
+bubble STILL SHOWS — the seam — giving up only the completing span through
+`_repair_continuous_seam`, which grades the VERBATIM join. WeCom's answer is ONE
+continuous stream across the two bubbles, so the boundary whitespace is real
+on-screen text, not a message break. The stripped `repaired_after_a_sent_tail` the
+separate-message channels (Telegram, WhatsApp) use must NOT be consulted here: it
+strips the boundary whitespace because those platforms drop it between messages, so
+on WeCom it would see a join across a space the reader actually sees (`…AKIAIOSF`
+then ` ODNN7…` reads as two space-separated tokens, not a key) and over-redact
+harmless prose that merely mentions example-key fragments. `_seam_showing` supplies
+the seams as a LIST: when the answer has
+advanced (`_carried > 0`) the one seam is the delivered answer prefix; when no
+answer has been delivered yet (`_carried == 0`) the seams are the reasoning
+candidates a reasoning-only bubble was sealed on, so a key spanning the
+reasoning→answer boundary is closed too.
+
+**Which reasoning frames are candidates: ALL of them, because WeCom gives no
+positive acceptance signal.** Each reasoning frame replaces the bubble's whole
+content, so the reader sees exactly ONE — the last accepted. But `send_stream`
+never waits for the per-frame ACK (every frame of a turn replays the one inbound
+`req_id`, which is the only key an ACK carries, so an ACK cannot be attributed to
+the frame that drew it), and `_track_stream` RETIRES any outstanding non-terminal
+rejection the instant the next frame is sent. So right after sending frame B,
+`stream_had_rejection` is false in the ordinary case — not because B was accepted,
+but because nothing has reported on B yet — and B's own rejection ACK can still land
+late. There is therefore no point at which a candidate is provably superseded, so
+`_shown_reasonings` keeps EVERY frame put on the socket (appended deduped, never
+evicted) and the continuation is graded against all of them. The tempting collapse —
+drop the earlier candidates once the stream shows no rejection — is unsound for
+exactly this reason: it would discard the earlier frame A that is still what the
+reader sees when the newer frame B is refused late, and the rotation seam would then
+grade only B (ending in prose) and pass vacuously while A's credential prefix
+rejoins the answer on screen. A fixed count window is unsound for the mirror reason:
+under a sustained run of refusals the DISPLAYED frame is an earlier, shorter prefix,
+and evicting the oldest drops exactly it. Retention is bounded instead by dedup
+(throttled re-sends of identical reasoning collapse) and by a COUNT cap
+(`_MAX_REASONING_CANDIDATES`) on distinct frames — kept SOUND by `_push` STOPPING
+reasoning sends once the cap is reached rather than evicting, so the bubble keeps
+showing a retained frame and no un-retained text ever reaches the screen (an
+eviction could instead drop the displayed prefix). Each suppressed update is
+COUNTED and announced once from `close()` as a bounded post-turn notice (the answer
+is unaffected), because the AUTOSDE bound rule requires overflow to be said out loud
+rather than letting the reasoning preview silently freeze. The cap is SHARED across
+`_reasoning_seams` (frozen prefixes carried from prior rolls) and
+`_shown_reasonings` (the current bubble): the send-stop counts their combined total,
+so the carried-seam UNION at a rotation is already within bound and is NEVER sliced.
+Slicing it would be unsound — `[:cap]` keeps the oldest and drops the NEWEST frozen
+prefix, which is the bubble that sealed last and sits immediately above the
+continuation, exactly the seam a key joins to (nothing follows it, so it is not
+covered as a prefix of a later frame). Each retained string is itself
+byte-bounded at the append, satisfying `a-bound-bounds-every-field-it-retains` on
+both the count and the item. At a rotation the candidates are
+carried into `_reasoning_seams` as a UNION while `_carried == 0`: a reasoning-only
+bubble can seal, roll to a bubble also refused before any answer, and roll again —
+the first roll's frozen reasoning is still on screen above both, so replacing
+(rather than unioning) would drop it and leak. Grading against every retained
+candidate is the sound direction: over-grading one the reader does not see only
+redacts a fragment (cosmetic), while missing the one they do see leaks the key. The
+redaction-notice recount runs AFTER this seam pass, so a reply whose only redaction
+is a seam repair still announces it.
+
+**The seam-rendered chunks are re-bound by the wire BYTE limit.** The split sizes
+chunks in characters (`WECOM_SAFE_REPLY_CHARS` = the byte cap // 4), which has zero
+byte headroom only for a chunk of almost entirely 4-byte astral characters — and the
+first chunk's seam repair then prepends a ~22-byte redaction tag while dropping fewer
+bytes, which can nudge it past the 20480-byte cap. `send_stream`'s `truncate_utf8`
+would drop that overflow silently while `drive_turn` persists the full answer, so
+after the seam pass each chunk is re-flowed through `split_markdown_bytes` and the
+over-byte tail becomes a following chunk (delivered as overflow, never lost). The
+re-split is safe because the chunks are already redacted whole: a seam-straddle
+credential is a tag at the head and a byte cut falls between tags, not through a key.
+
+The STREAMING path (`_push`) has the same hazard and the mirror fix. A streaming
+frame's progress offset `sent_abs` is fixed from the RAW slice before the seam
+render, and `send_stream` truncates the rendered frame to the byte cap silently
+while returning success — so a seam repair that pushes a near-astral slice over the
+cap would advance `_sent_abs` past bytes the wire dropped, and the next aged
+rotation (`_carried = _sent_abs`) would resume PAST the undelivered suffix. So when
+the rendered frame exceeds the byte cap, `_push` shrinks the RAW slice and
+re-renders until it fits, then derives `sent_abs` from that shorter raw slice; the
+remainder rides the next frame of the bubble exactly as the character cut already
+intends. A credential split at the shrink boundary is caught by the next frame's own
+seam grade (its seam is the now-delivered prefix), so shrinking introduces no leak.
+
 **Reasoning is redacted on the JOINED text, because the join is the risk.**
 `TurnDriver` redacts each thinking chunk, but with a plain per-chunk pass rather than
 the rolling `StreamRedactor` it uses for the answer — so a credential split across
