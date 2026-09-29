@@ -74,7 +74,7 @@ def _server(svc: CronService, app_claim: str) -> web.Application:
         request["user"] = OWNER_SUBJECT
         request["app"] = app_claim
         if app_claim:
-            denied = token_auth._enforce_app_scope(request, app_claim, request.path)
+            denied = await token_auth._enforce_app_scope(request, app_claim, request.path)
             if denied is not None:
                 return denied
         return await handler(request)

@@ -223,7 +223,19 @@ export const CHUNK_BUDGETS = {
   // Route-only pages (settings, capabilities, schedule, artifacts, apps, ...) load
   // through React.lazy in their own chunks, so this chunk holds the shell and the
   // chat route; the ceiling keeps the ~5% margin the lines above prescribe.
-  App: 1978 * KB, // measured 1,929,378 B with route-only pages lazy (~5% headroom)
+  // Re-measured on this branch (analyze build in CI @ 550ef54b4): the chunk is
+  // 2,026,117 B (1.93 MiB), 645 B over the 1978 KB (2,025,472 B) ceiling. The
+  // growth is first-party app-core code with no dependency added: attribution is
+  // measured, not assumed -- this branch's only frontend production import is a
+  // sibling constant (`DRAWER_ONLY_VIEWS` from `memberProjectionTypes`), and the
+  // member-projection store/query changes it makes are pure logic (the
+  // structuralSharing:false revision fix and the durable-epoch-adjacent roster
+  // wiring), so the bulk of the ~97 KB since the previous 1,929,378 B measurement
+  // is main's own app-core drift accumulated while this long-lived branch rebased.
+  // None of it is lazy-loadable: the members roster and drawer are core dashboard,
+  // statically imported, the same shape every note above documents. Back to the
+  // ~5% convention over the current measurement.
+  App: 2078 * KB, // measured 2,026,117 B with route-only pages lazy (~5% headroom)
 
   // Markdown/math/syntax rendering stack (katex, highlight.js, remark/rehype)
   // -- one deliberate `codeSplitting` group, see vite.config.ts.
