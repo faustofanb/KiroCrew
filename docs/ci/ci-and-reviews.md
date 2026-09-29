@@ -657,6 +657,22 @@ native Windows or CodeBuild lifecycle facts. Task Scheduler pod boot, interactiv
 installer, namespace E2E/sandbox, release and GUI jobs remain outside this migration
 pending real container proof or infrastructure approval.
 
+Neither CodeBuild image ships a runner tool cache, so every `setup-node` step
+there resolved its bare major through `actions/node-versions`' manifest -- one
+authenticated `api.github.com` call per step, per run, against the same
+`GITHUB_TOKEN` hourly budget the fleet's other calls share. The composite
+`.github/actions/seed-node-tool-cache` runs before each `setup-node` on a
+CodeBuild-routed job (and inside `setup-windows-tests`): on
+`runner.environment == 'self-hosted'` it reads the newest release of the major
+from nodejs.org's `index.json`, verifies the tarball against nodejs.org's
+`SHASUMS256.txt`, and unpacks it into `RUNNER_TOOL_CACHE/node/<version>/<arch>`
+with the `<arch>.complete` marker `@actions/tool-cache` looks for. `setup-node`
+checks that directory before the manifest, so its log then reads `Found in
+cache @ ...` instead of `Attempting to download 24...`. On GitHub-hosted
+runners the composite does nothing. It changes no pin: the version input must
+match the following `setup-node` step, and `test_node_version_pins.py` still
+governs the `setup-node` pins themselves.
+
 Rollback needs no AWS change: set Linux resolver outputs to `ubuntu-latest` and
 Windows to `windows-latest`, and return the two direct routes (`changes` and
 `await-fast-gate`) to hosted; an individual consumer can instead use its hosted
