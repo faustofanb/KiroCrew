@@ -225,6 +225,14 @@ export interface ChatInputProps {
   continuing?: boolean
   isQueued?: boolean
   stopState?: 'idle' | 'soft_pending' | 'killing'
+  /** An automatic context compaction is running on this session. With no turn
+   *  running and nothing typed, the send slot shows a non-destructive
+   *  "compacting" state instead of Send: a Stop here would cancel the
+   *  compaction, not a turn, and the backend declines it. */
+  compacting?: boolean
+  /** A cooperative Stop was declined moments ago because the session was
+   *  compacting; the next press is the force stop and the armed Stop says so. */
+  stopDeclined?: boolean
   approvalMode?: string
   reasoningEffort?: string
   /** True when `reasoningEffort` is the configured default rather than a

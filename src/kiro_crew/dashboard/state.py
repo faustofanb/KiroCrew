@@ -117,6 +117,7 @@ from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.security.credential_sources import CredentialEvidence
 from kiro_crew.sel import sel
 from kiro_crew.session_compaction import (
+    COMPACT_OUTCOME_CANCELLED,
     COMPACT_OUTCOME_COMPACTED,
     COMPACT_OUTCOME_RECYCLED,
     COMPACT_OUTCOME_RESTARTED_UNCOMPACTABLE,
@@ -1302,9 +1303,18 @@ _AUTO_COMPACT_NOTICE = "🔄 Auto-compacted at {pct:.0f}%."
 #: separate template because ``_AUTO_COMPACT_NOTICE`` would announce a summary that
 #: never happened, and the user's next question -- why does the agent not remember
 #: this -- is answerable only if the notice said what actually occurred.
+#: Both restart notices end in ``_RESTART_MEMORY_TAIL`` because that sentence is
+#: what the successor actually does: its first turn is built from a recent excerpt
+#: of this transcript (``ContextBuilder`` thread history). Naming the excerpt is
+#: the point: a user who believes the context is gone for good has no reason to
+#: ask the agent to pick the work back up.
+_RESTART_MEMORY_TAIL = (
+    "The conversation above is still here, and the agent's next reply starts from a "
+    "recent excerpt of it rather than the whole thing."
+)
 _AUTO_RECYCLE_NOTICE = (
     "♻️ Compaction didn't succeed at {pct:.0f}%, so the session was restarted "
-    "instead. The conversation above is still here; the agent no longer remembers it."
+    "instead. " + _RESTART_MEMORY_TAIL
 )
 #: The same restart, for a backend that never had a compaction to attempt. Only this
 #: one may name the missing capability: the notice above is reached by kiro-cli and
@@ -1312,8 +1322,17 @@ _AUTO_RECYCLE_NOTICE = (
 #: backend cannot compact would be false.
 _AUTO_RESTART_UNCOMPACTABLE_NOTICE = (
     "♻️ Context reached {pct:.0f}% and this backend cannot compact at all, so "
-    "the session was restarted. The conversation above is still here; the agent no "
-    "longer remembers it."
+    "the session was restarted. " + _RESTART_MEMORY_TAIL
+)
+#: A user Stop ended the compaction turn. The only Stop that reaches a compacting
+#: session is the FORCED one, and a forced stop restarts the session, so the
+#: notice says so with the restart notices' own verb and memory tail; what tells
+#: it apart from them is the actor it leads with: nothing failed, the user ended
+#: it.
+_AUTO_COMPACT_CANCELLED_NOTICE = (
+    "⏹ Your forced Stop ended the compaction (condensing the conversation to free space) "
+    "that started at {pct:.0f}% of the context limit, so the session was restarted. "
+    + _RESTART_MEMORY_TAIL
 )
 _AUTO_COMPACT_WAITING_NOTICE = (
     "⏸ Auto-compact failed at {pct:.0f}%. The session is waiting for its sub-agents "
@@ -2739,6 +2758,8 @@ class _ChatSlot:
         "_on_question_retired",
         "_coordinator_approvals",
         "_has_reader_flag",
+        "_compacting",
+        "_stop_declined_at",
         "_stop_state_raw",
         "_stop_generation",
         "_stop_event_id",
@@ -3353,6 +3374,21 @@ class _ChatSlot:
         # the state to learn that this slot is waiting.
         self._coordinator_approvals: Callable[[str], list[dict]] | None = None
         self._has_reader_flag: bool = False  # True when HTTP SSE stream is draining
+        # True while the session manager runs an automatic compaction on this
+        # slot's session. Written by the compacting observer wired in
+        # ``wire_session_compact_callback`` and read by the slot projection, so
+        # the composer can show the compaction while it runs and the Stop button
+        # can warn before a press that would fail it. Not persisted:
+        # a compaction never outlives the gateway process.
+        self._compacting: bool = False
+        # Monotonic time of the last cooperative Stop this slot DECLINED because
+        # its session was compacting; 0.0 when none. Kept apart from
+        # ``_stop_state`` on purpose: that machine is read by the queue drain as
+        # "a stop is in progress" and persists a "Session reset" row on it, and a
+        # declined Stop stopped nothing. What the marker buys is the escape
+        # hatch: a press that lands within ``STOP_DECLINED_ESCALATION_SECS`` of
+        # a decline is the user's second press and escalates to the force stop.
+        self._stop_declined_at: float = 0.0
         self._stop_state_raw: str = "idle"  # 'idle' | 'soft_pending' | 'killing'
         # Monotonic count of stop INITIATIONS (idle → active edges of
         # _stop_state). Teardown resets _stop_state back to "idle" but never
@@ -6313,6 +6349,8 @@ class DashboardState:
                 return
             if outcome == COMPACT_OUTCOME_WAITING_FOR_SUBAGENTS:
                 template = _AUTO_COMPACT_WAITING_NOTICE
+            elif outcome == COMPACT_OUTCOME_CANCELLED:
+                template = _AUTO_COMPACT_CANCELLED_NOTICE
             elif not success:
                 template = _AUTO_COMPACT_FAILED_NOTICE
             elif outcome == COMPACT_OUTCOME_RESTARTED_UNCOMPACTABLE:
@@ -6360,6 +6398,28 @@ class DashboardState:
                     )
 
         self.sessions.set_compact_callback(_on_compacted)
+
+        def _on_compacting_changed(key: str, on: bool) -> None:
+            # The slot learns the compaction is RUNNING, not only how it ended:
+            # the composer shows it and the Stop button warns on it.
+            # Synchronous, from the tick that committed the membership change,
+            # so the broadcast that follows agrees with ``is_compacting``.
+            from kiro_crew.dashboard.chat_utils import dashboard_slot_key
+
+            slot_key = dashboard_slot_key(key)
+            slot = self.get_slot(slot_key) if slot_key else None
+            if slot is None or slot._compacting == on:
+                return
+            slot._compacting = on
+            if not on:
+                # The decline marker was this compaction's; the next one, even
+                # inside the window, owes its own first refusal.
+                slot._stop_declined_at = 0.0
+            self.push_slots_update()
+
+        setter = getattr(self.sessions, "set_compacting_callback", None)
+        if callable(setter):
+            setter(_on_compacting_changed)
 
     async def _notify_channel_compaction(
         self,

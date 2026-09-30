@@ -117,8 +117,11 @@ export function useComposerSend({ slotId, busyMode, isRunning, stopState, canSte
 
 /** The send slot while a turn runs or a stop is in progress. Stop escalates
  *  from a soft stop to a force kill; a draft offers steer or queue. */
-export function BusySendControls({ stopState, killingEscaped, stopWithTap, isQueued, composerHasDraft, canSteer, onSteer, steerOnly, fireComposer, disabled, connected, effectiveBusyMode, setBusySendMode, sendOnEnter, jevAutoAvailable, onStop }: {
+export function BusySendControls({ stopState, killingEscaped, stopWithTap, isQueued, composerHasDraft, canSteer, onSteer, steerOnly, fireComposer, disabled, connected, effectiveBusyMode, setBusySendMode, sendOnEnter, jevAutoAvailable, onStop, stopDeclinedArmed = false }: {
   stopState?: 'idle' | 'soft_pending' | 'killing'
+  /** The press before this one was declined (compaction); the backend treats
+   *  the next press as the force stop, and the armed Stop's hint says so. */
+  stopDeclinedArmed?: boolean
   killingEscaped: boolean
   stopWithTap: () => void
   isQueued: boolean
@@ -219,6 +222,17 @@ export function BusySendControls({ stopState, killingEscaped, stopWithTap, isQue
           <ArrowUpFromLine size={18} />
         </button>
       )
+    ) : onStop && stopDeclinedArmed ? (
+      // The press before this one was declined (compaction); the backend treats
+      // the next press as the force stop, and the hint names the cost before
+      // the user finds out by pressing. min-w-0 + wrap: a long localized hint
+      // shrinks beside the fixed control instead of overflowing a narrow composer.
+      <div className="flex items-center gap-1.5 min-w-0">
+        <button className="w-8 h-8 shrink-0 rounded-lg bg-transparent border-none text-danger hover:bg-danger/10 flex items-center justify-center cursor-pointer transition-all" onClick={stopWithTap} title={i18nT('components.chatInput.force_kill_discards_in_progress_work_and_queued')} aria-label={i18nT('components.chatInput.force_kill_session_discards_in_progress_work_and')} data-testid="stop-button-armed">
+          <Square size={18} fill="currentColor" />
+        </button>
+        <span className="text-[13px] leading-4 text-muted min-w-0 break-words" data-testid="stop-declined-hint">{i18nT('components.chatInput.click_again_to_force_stop_resets_session')}</span>
+      </div>
     ) : onStop ? (
       <button className="w-8 h-8 rounded-lg bg-transparent border-none text-danger hover:bg-danger/10 flex items-center justify-center cursor-pointer transition-all" onClick={stopWithTap} title={i18nT('components.chatInput.stop_generation')} aria-label={i18nT('components.chatInput.stop_generation')} data-testid="stop-button-armed">
         <Square size={18} fill="currentColor" />
@@ -247,5 +261,25 @@ export function BusySendControls({ stopState, killingEscaped, stopWithTap, isQue
         autoAvailable={jevAutoAvailable}
       />
     )
+  )
+}
+
+/** The send slot while an automatic compaction holds the session and no turn
+ *  runs. Not a button: a stop-shaped control that does nothing invites a press.
+ *  A plain spinner in the Stop control's slot and a visible hint saying Stop is
+ *  unavailable, with the same 13px trailing-hint shape as the armed state so the
+ *  corner keeps one shape across the stop states. */
+export function CompactingIndicator() {
+  return (
+    <div className="flex items-center gap-1.5 min-w-0" data-testid="compacting-indicator">
+      <span
+        className="w-8 h-8 shrink-0 rounded-lg text-muted flex items-center justify-center"
+        aria-hidden="true"
+        data-testid="compacting-spinner"
+      >
+        <Loader2 size={18} className="animate-spin" />
+      </span>
+      <span className="text-[13px] leading-4 text-muted min-w-0 break-words" role="status" aria-live="polite" data-testid="compacting-hint">{i18nT('components.chatInput.compacting_context_stop_unavailable')}</span>
+    </div>
   )
 }

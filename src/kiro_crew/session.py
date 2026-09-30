@@ -933,7 +933,7 @@ def _provider_has_unfinished_turn(provider: LLMProvider) -> bool:
     return res is True
 
 
-StopOutcome = Literal["soft", "hard", "idle"]
+StopOutcome = Literal["soft", "hard", "idle", "compacting"]
 
 
 class FirstTurnState(Enum):
@@ -1022,6 +1022,11 @@ class _Session:
     # remembers WHO held it, so that task's later key-only ``release`` is
     # absorbed instead of unlocking whatever successor now occupies the key.
     turn_owner: Any = None
+    # Set by the allocation layer when a claim or registration adopted entries a
+    # forced stop parked (``session_lifecycle.adopt_parked_queue``); ``release``
+    # reads and clears it to wake those entries' channel drains once the lease
+    # is free.
+    adopted_parked: bool = False
     approval_policy: str = ""  # "" (interactive) | "auto" (auto-approve all tools)
     agent: str = ""  # kiro agent name used for this session
     capability_member: str = ""
@@ -2619,6 +2624,14 @@ class SessionManager:
         """Register the compaction completion callback."""
         self._compaction.set_compact_callback(cb)
 
+    def set_compacting_callback(self, cb: Callable[[str, bool], None] | None) -> None:
+        """Register the observer told when a session enters or leaves compaction."""
+        self._compaction.set_compacting_callback(cb)
+
+    def is_compacting(self, key: str) -> bool:
+        """Whether an automatic compaction is in flight on *key* right now."""
+        return self._compaction.is_compacting(key)
+
     def mark_needs_reinjection(self, key: str) -> None:
         """Mark a live session for one-shot context reinjection."""
         self._compaction.mark_needs_reinjection(key)
@@ -2900,9 +2913,11 @@ class SessionManager:
             key, pct_before, pct_after, expect=expect
         )
 
-    async def _fire_compact_callback(self, key: str, pct: float, *, success: bool) -> None:
+    async def _fire_compact_callback(
+        self, key: str, pct: float, *, success: bool, outcome: str | None = None
+    ) -> None:
         """Delegate compaction callback dispatch."""
-        await self._compaction._fire_compact_callback(key, pct, success=success)
+        await self._compaction._fire_compact_callback(key, pct, success=success, outcome=outcome)
 
     async def _fire_recycle_callback(self, key: str, *, reason: str) -> None:
         """Dispatch a lifecycle recycle callback through the lifecycle boundary."""
@@ -3173,8 +3188,25 @@ class SessionManager:
         """Consume a queued-message cancellation marker."""
         return self._allocation_boundary().is_cancelled(key, msg_ts)
 
-    def clear_queue(self, key: str, owned_by: Callable[[dict], bool] | None = None) -> None:
+    def detach_queue(self, key: str) -> tuple[Any, ...]:
+        """Take the queued entries out of the live queue, keeping their files."""
+        return self._allocation_boundary().detach_queue(key)
+
+    def restore_queue(self, key: str, entries: tuple[Any, ...]) -> None:
+        """Put ``detach_queue``'s entries back at the head of the queue."""
+        self._allocation_boundary().restore_queue(key, entries)
+
+    def clear_queue(
+        self,
+        key: str,
+        owned_by: Callable[[dict], bool] | None = None,
+        *,
+        only: tuple[Any, ...] | None = None,
+    ) -> None:
         """Clear queued messages and their temporary paths.
+
+        *only* narrows the clear to the handles ``detach_queue`` returned, so a
+        Stop drops what was queued when it was pressed and nothing admitted since.
 
         *owned_by* narrows the clear to the entries it selects, for a caller acting for
         ONE principal rather than for the whole session: under
@@ -3188,7 +3220,7 @@ class SessionManager:
         Omitted, the whole queue goes, which is what a whole-session request means:
         teardown, a generation bump, a fresh conversation.
         """
-        self._allocation_boundary().clear_queue(key, owned_by)
+        self._allocation_boundary().clear_queue(key, owned_by, only=only)
 
     async def is_provider_alive(self, key: str) -> bool | None:
         """Probe a folded session provider outside the registry lock."""

@@ -1848,7 +1848,7 @@ class DiscordDispatcher:
         another transport too.
         """
         assert self.client is not None
-        reply = await stop_running_turn(
+        await stop_running_turn(
             self.sessions,
             resumed_key or self._session_key(user_id, thread_id),
             queue=self._queue,
@@ -1858,8 +1858,8 @@ class DiscordDispatcher:
                     user_id=str(user_id), channel_id=str(channel_id), thread_id=str(thread_id or "")
                 )
             ),
+            deliver=lambda text: self.client.send_message(channel_id, text),  # type: ignore[union-attr]
         )
-        await self.client.send_message(channel_id, reply)
 
     # ── Button handler (client's on_interaction) ───────────────────────────
 

@@ -30,6 +30,7 @@ import { useLanguageGeneration } from '../i18n/useLanguageGeneration'
 import { useComposerDraftText, useComposerVoiceSlice, type ComposerVoiceInputProps } from '../chat-core/composer/Composer'
 import { useComposerTreeDrop } from './composerTreeDrop'
 import { useStopEscapeHatch } from '../hooks/useStopEscapeHatch'
+import { useStopDeclinedHint } from '../hooks/useStopDeclinedHint'
 import { useScrollEdges } from '../hooks/useScrollEdges'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from './ui/dropdown-menu'
 import { i18nT } from '../i18n/t'
@@ -47,7 +48,7 @@ import { HoldToTalkBar, MicButton, VoiceCaptureStatus } from './chat-input/Voice
 import { AgentChip, ContextUsageControl, ModelChip, SessionControlChips, useContextPopover, useShelfMeasure } from './chat-input/ContextShelf'
 import { useAutoCompactThreshold } from './chat-input/autoCompact'
 import { AttachMenu, usePlusMenu } from './chat-input/attach'
-import { BusySendControls, useComposerSend } from './chat-input/busySend'
+import { BusySendControls, CompactingIndicator, useComposerSend } from './chat-input/busySend'
 import { CollapsedComposerBar, collapseMenuRowElement, useComposerCollapse } from './chat-input/collapse'
 import { useComposerFocus, useComposerKeyDown, useEditorInput } from './chat-input/keyboard'
 import { INPUT_DRAG_MIN_H, useManualHeight, useStripHeights, useTextareaAutosize } from './chat-input/sizing'
@@ -146,6 +147,8 @@ function ChatInput({
   showContextPct,
   showContextTokens,
   isRunning = false,
+  compacting = false,
+  stopDeclined = false,
   onStop,
   continuable = false,
   continueIsRecovery = false,
@@ -267,6 +270,8 @@ function ChatInput({
 
   // Stop button: killing-state escape hatch (re-enable after 15s)
   const { escaped: killingEscaped } = useStopEscapeHatch(stopState)
+  // Timed client-side from the frame that carried the decline; see the hook.
+  const stopDeclinedArmed = useStopDeclinedHint(stopDeclined)
 
   const spawnApprovals = useSpawnApprovals({ slotId, slotApprovalChrome, dispatch })
 
@@ -1072,8 +1077,19 @@ function ChatInput({
                 steer path: a host without onStop (the side panel — stopping the
                 main turn from there would be misdirected) still needs the
                 split steer/queue button while a turn runs. */}
-            {(isRunning || stopState === 'soft_pending' || stopState === 'killing') && (onStop || (canSteer && onSteer)) ? (
-              <BusySendControls stopState={stopState} killingEscaped={killingEscaped} stopWithTap={stopWithTap} isQueued={isQueued} composerHasDraft={composerHasDraft} canSteer={canSteer} onSteer={onSteer} steerOnly={steerOnly} fireComposer={fireComposer} disabled={disabled} connected={connected} effectiveBusyMode={effectiveBusyMode} setBusySendMode={setBusySendMode} sendOnEnter={sendOnEnter} jevAutoAvailable={jevAutoAvailable} onStop={onStop} />
+            {compacting && !isRunning && !composerHasDraft && (!stopState || stopState === 'idle') ? (
+              // An automatic compaction holds the session. It is NOT a turn
+              // (`isRunning` is false), so without this branch the composer
+              // read idle and the only affordance was Send. Yields to a LIVE
+              // turn: a turn sharing the session with a compaction keeps its
+              // armed Stop and steer controls, and the backend declines the
+              // first press with a card while arming the second as the force
+              // escape. Also yields to an in-flight stop and to a TYPED DRAFT:
+              // the idle Send queues the message behind the compaction, so a
+              // user with something to say is never left without a send.
+              <CompactingIndicator />
+            ) : (isRunning || stopState === 'soft_pending' || stopState === 'killing') && (onStop || (canSteer && onSteer)) ? (
+              <BusySendControls stopState={stopState} killingEscaped={killingEscaped} stopWithTap={stopWithTap} isQueued={isQueued} composerHasDraft={composerHasDraft} canSteer={canSteer} onSteer={onSteer} steerOnly={steerOnly} fireComposer={fireComposer} disabled={disabled} connected={connected} effectiveBusyMode={effectiveBusyMode} setBusySendMode={setBusySendMode} sendOnEnter={sendOnEnter} jevAutoAvailable={jevAutoAvailable} onStop={onStop} stopDeclinedArmed={stopDeclinedArmed} />
             ) : (<>
               {promptOptimizer && <button
                 className={`w-8 h-8 rounded-lg border-none flex items-center justify-center cursor-pointer transition-all disabled:cursor-not-allowed ${optimizing ? 'bg-accent/20 text-accent animate-pulse' : 'bg-transparent text-muted hover:text-accent hover:bg-accent/10 disabled:opacity-40 disabled:hover:text-muted disabled:hover:bg-transparent'}`}
