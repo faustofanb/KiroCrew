@@ -2919,6 +2919,12 @@ class TaskRunner:
                                 "error": t.error or "",
                                 "result": (t.result or "")[:2000],
                                 "attempts": t.attempts,
+                                # Durable so an ambiguous-delivery resume hint set
+                                # on a crash-recovery retry survives a gateway
+                                # restart; without it a restart in that window
+                                # would restore the task to a verbatim replay of a
+                                # possibly-executed step.
+                                "resume_hint": t.resume_hint or "",
                             }
                             for t in run.tasks
                         ],
@@ -3087,6 +3093,7 @@ class TaskRunner:
                         status=TaskStatus(t["status"]),
                         error=t.get("error", ""),
                         result=t.get("result", ""),
+                        resume_hint=t.get("resume_hint", ""),
                         attempts=t.get("attempts", 1),
                         depends_on=t.get("depends_on", []),
                         requires_approval=t.get("requires_approval", False),

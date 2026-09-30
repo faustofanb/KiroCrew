@@ -690,7 +690,9 @@ class AcpSessionProvider(LLMProvider):
             cause = registration_throttle_line(tail) if tail else None
             if cause is not None:
                 return registration_rate_limited_error(str(exc), cause)
-        return AcpProcessDied(str(exc))
+        return AcpProcessDied(
+            str(exc), ambiguous_delivery=getattr(exc, "ambiguous_delivery", False)
+        )
 
     async def _guarded(self, awaitable: Any) -> Any:
         """Await a runtime-touching handle coroutine, translating AcpRuntimeDead

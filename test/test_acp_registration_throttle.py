@@ -215,6 +215,25 @@ def test_translate_dead_stays_generic_without_the_signature():
     assert type(exc) is AcpProcessDied
 
 
+def test_translate_dead_carries_ambiguous_delivery_onto_the_process_died():
+    """A drain-stall death flagged ambiguous_delivery must keep that flag through
+    translation, so the recovery path suppresses a verbatim prompt replay."""
+    from unittest.mock import MagicMock
+
+    from kiro_crew.acp.runtime import AcpRuntimeDead
+
+    runtime = MagicMock()
+    runtime.saw_not_logged_in.return_value = False
+    runtime.redacted_stderr_tail.return_value = ""
+    ambiguous = _provider(runtime)._translate_dead(
+        AcpRuntimeDead("stdin stalled", ambiguous_delivery=True)
+    )
+    assert type(ambiguous) is AcpProcessDied
+    assert ambiguous.ambiguous_delivery is True
+    plain = _provider(runtime)._translate_dead(AcpRuntimeDead("process exited (rc=1)"))
+    assert plain.ambiguous_delivery is False
+
+
 # ── activity latch: classification is pre-work only ──
 
 

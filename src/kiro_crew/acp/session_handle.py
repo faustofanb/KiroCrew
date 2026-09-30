@@ -733,7 +733,19 @@ class AcpRuntimeError(Exception):
 
 
 class AcpRuntimeDead(AcpRuntimeError):
-    """Raised when the underlying process has died."""
+    """Raised when the underlying process has died.
+
+    ``ambiguous_delivery`` is True when the death followed a request-frame drain
+    stall whose bytes had already reached the transport (see
+    :class:`AcpProcessDied` for the recovery consequence); it rides through
+    ``AcpSessionProvider._translate_dead`` onto the ``AcpProcessDied`` the caller
+    recovers from. False for every other death, including a lock-phase stall that
+    wrote nothing.
+    """
+
+    def __init__(self, *args: object, ambiguous_delivery: bool = False) -> None:
+        super().__init__(*args)
+        self.ambiguous_delivery = ambiguous_delivery
 
 
 class AcpFrameTooLarge(AcpRuntimeError):
