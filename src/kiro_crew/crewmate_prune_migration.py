@@ -679,6 +679,11 @@ def remove_never_chatted(
                 _locks: contextlib.ExitStack = locks,
             ) -> dict | None:
                 nonlocal deleted, gave_up
+                # The scan skipped the default row as the merged config read
+                # it; a ``config set default_agent`` landing after the scan is
+                # visible only on the fresh base document held here.
+                if _name == "default" or doc.get("default_agent") == _name:
+                    return None
                 agents = coerce_dict_section(doc, "agents")
                 raw = agents.get(_name)
                 if not isinstance(raw, dict) or raw.get("kiro_agent") != _bound:
@@ -716,6 +721,12 @@ def remove_never_chatted(
                 except (OSError, ConfigReadError, TeamsUnreadable):
                     return None
                 if _name in teamed:
+                    return None
+                # The default crew can be selected in the overlay alone
+                # (``config set --local default_agent``), which the base
+                # document does not carry; read under the overlay lock, so a
+                # name made the default after the scan is refused, not deleted.
+                if isinstance(overlay, dict) and overlay.get("default_agent") == _name:
                     return None
                 if _skill_view:
                     # No spec to re-read: discovery never lists an alias. The

@@ -1030,6 +1030,46 @@ class TestCandidates:
         assert "scout" in KiroCrewConfig.load().agents
         assert not mig.marker_path().exists()
 
+    def test_an_overlay_default_selected_under_the_lock_refuses_the_delete(
+        self, old_style_config, bindings_dir, log
+    ):
+        # ``config set --local default_agent scout`` writes a top-level key the
+        # overlay ``agents`` check cannot see; the locked re-check reads it too.
+        from kiro_crew.config.loader import config_local_path
+
+        original = mig.remove_never_chatted
+
+        def _select_then_remove(cfg_, names, **kw):
+            config_local_path().write_text(json.dumps({"default_agent": "scout"}))
+            return original(cfg_, names, **kw)
+
+        with patch.object(mig, "remove_never_chatted", _select_then_remove):
+            report = _run(old_style_config, log)
+        assert report.refused == ["scout"]
+        assert "scout" in KiroCrewConfig.load().agents
+        assert not mig.marker_path().exists()
+
+    def test_a_base_default_selected_under_the_lock_refuses_the_delete(
+        self, old_style_config, bindings_dir, log
+    ):
+        # ``config set default_agent scout`` after the scan lands in the base
+        # document; the locked re-check reads the fresh base document too.
+        from kiro_crew.config.loader import config_path
+
+        original = mig.remove_never_chatted
+
+        def _select_then_remove(cfg_, names, **kw):
+            doc = json.loads(config_path().read_text())
+            doc["default_agent"] = "scout"
+            config_path().write_text(json.dumps(doc))
+            return original(cfg_, names, **kw)
+
+        with patch.object(mig, "remove_never_chatted", _select_then_remove):
+            report = _run(old_style_config, log)
+        assert report.refused == ["scout"]
+        assert "scout" in KiroCrewConfig.load().agents
+        assert not mig.marker_path().exists()
+
     def test_a_teamed_row_is_never_a_candidate(self):
         # Placing a crewmate on a team is the owner's own act, so the row is
         # the owner's whatever its shape.
