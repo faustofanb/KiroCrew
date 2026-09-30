@@ -25,7 +25,7 @@ const STATE_KEYS: Record<RunState, string> = {
   blocked: 'commandCenter.blocked', waiting: 'commandCenter.waiting', needs_input: 'commandCenter.state_needs_input', stopped: 'commandCenter.stopped',
 }
 
-export default function CommandCenterPanel({ slot, active, publishedView, sessionReady = true }: {
+export default function CommandCenterPanel({ slot, active, publishedView, sessionReady = true, crewMain = false }: {
   slot: string | null
   active: boolean
   /** A Crew publication remains readable while its thread is revalidated;
@@ -34,6 +34,26 @@ export default function CommandCenterPanel({ slot, active, publishedView, sessio
   /** The Crew host supplies its existing published view, with its own sandbox.
    * Presentation composition never grants a document native action authority. */
   publishedView?: { title: string; content: ReactNode }
+  /** This is a crew's MAIN session, so the panel body is ONE template document
+   * (`dashboard_templates/crew_main.html`) whose every count `build_crew_main` derived
+   * from that crew's crew-log folds. The shell then draws no summary number of its own:
+   * the `StatusTiles` readout and the progress bar come out, because a number computed
+   * here from the slot list is a second answer to a question the log already answers, and
+   * the two disagree the moment one source lags.
+   *
+   * The `TileList` sections come out with them -- Blocked, Progress and the work-item
+   * rows. This panel is about the CREW; a worker's detail is read by opening that worker,
+   * where its own panel answers for it.
+   *
+   * What stays is everything that is a CONTROL rather than a summary: the approval and
+   * question cards, the tab that filters them, and the badge on that tab -- which counts
+   * the cards on screen in this tab, a fact about the live inventory the reader is
+   * looking at, not a summary of the crew's history.
+   *
+   * Nothing else passes this. `StatusTiles` and `TileList` are shared, so the dock keeps
+   * all three tiles and its own lists; the chat side panel and the fleet page keep their
+   * readouts and receive the same card as one framed section beside them. */
+  crewMain?: boolean
 }) {
   const { t } = useTranslation()
   const data = useCommandCenter(slot, active && sessionReady)
@@ -76,8 +96,15 @@ export default function CommandCenterPanel({ slot, active, publishedView, sessio
         {sessionReady && <span className="ml-auto text-[11px] text-muted inline-flex items-center gap-1"><ShieldCheck size={12} />{t('commandCenter.permission_mode', { mode: t(APPROVAL_MODE_KEYS[data.approvalMode]) })}</span>}
       </div>
       <div hidden={!sessionReady} className="space-y-3">
-      <StatusTiles data={data} />
-      {data.progress && <progress className="w-full h-1.5 accent-accent" value={data.progress.done} max={data.progress.total} aria-label={t('commandCenter.progress_label')} />}
+      {/* The shared readout and the bar are browser arithmetic over the slot list and the
+          work read. On a crew main session the template below carries the same counts
+          folded from the log, each with its denominator in words, so these come out rather
+          than sit above them saying something slightly different. The bar in particular is
+          a percentage drawn: it states a ratio while hiding both of its terms, which is why
+          it has no field in the contract to move to. The dock renders `StatusTiles` from
+          its own mount and is untouched by this. */}
+      {!crewMain && <StatusTiles data={data} />}
+      {!crewMain && data.progress && <progress className="w-full h-1.5 accent-accent" value={data.progress.done} max={data.progress.total} aria-label={t('commandCenter.progress_label')} />}
       <SegmentedControl value={section} onChange={setSection} collapse={false} wrap layoutId={`task-dashboard-section-${slot}`} segments={[
         { key: 'dashboard', label: t('commandCenter.dashboard'), icon: <LayoutDashboard size={14} /> },
         { key: 'attention', label: t('commandCenter.needs_input'), icon: <MessageSquare size={14} />, count: data.attention.length - data.approvalCount },
@@ -119,26 +146,28 @@ export default function CommandCenterPanel({ slot, active, publishedView, sessio
           <ErrorNotice message={requestDashboard.error?.message} />
         </div>}
       <div hidden={!sessionReady} className="space-y-3">
-      {/* The task's own automatic card. Workers carry none. Under Progress the
-          panel shows the work items whenever the board has any, partial or
-          not; the running runs are added only when the board is not the
-          progress source (absent, or with omitted entries), because that is
-          when the dock's Progress list shows runs, and that list caps its rows
-          and its overflow lands here, so the rest must be readable somewhere.
-          Idle and done runs stay with the sidebar's Subagents and Workflows
-          tabs; this is not a roster. */}
-      {slot && <SessionStatusFrame slot={slot} title={t('commandCenter.title')} active={active && sessionReady && showingOverview} />}
-      {data.blocked > 0 && <>
+      {/* The task's own automatic card. Workers carry none. On a crew main session this
+          frame IS the panel body -- one template document whose every count
+          `build_crew_main` folded from that crew's log -- so it is sized for a panel and
+          the three summary sections below come out. Everywhere else it stays one framed
+          section and those sections remain: under Progress the panel shows the work items
+          whenever the board has any, partial or not; the running runs are added only when
+          the board is not the progress source (absent, or with omitted entries), because
+          that is when the dock's Progress list shows runs, and that list caps its rows and
+          its overflow lands here, so the rest must be readable somewhere. Idle and done
+          runs stay with the sidebar's Subagents and Workflows tabs; this is not a roster. */}
+      {slot && <SessionStatusFrame panel={crewMain} slot={slot} title={t('commandCenter.title')} active={active && sessionReady && showingOverview} />}
+      {!crewMain && data.blocked > 0 && <>
         <PanelSectionHeader label={t('commandCenter.blocked')} count={data.blocked} />
         <TileList tile="blocked" data={data} />
       </>}
-      {(data.loading || data.workItems.length > 0 || (!boardStands && data.running > 0)) && <PanelSectionHeader label={t('commandCenter.tile_progress')} />}
-      {data.loading && <p role="status" className="text-sm text-muted">{t('commandCenter.loading')}</p>}
-      {data.workItems.map(item => <div key={item.item_id} className="text-[13px] border-l-2 border-border pl-3">
+      {!crewMain && (data.loading || data.workItems.length > 0 || (!boardStands && data.running > 0)) && <PanelSectionHeader label={t('commandCenter.tile_progress')} />}
+      {!crewMain && data.loading && <p role="status" className="text-sm text-muted">{t('commandCenter.loading')}</p>}
+      {!crewMain && data.workItems.map(item => <div key={item.item_id} className="text-[13px] border-l-2 border-border pl-3">
         <p>{item.title}</p><p className="text-muted text-[12px]">{t(STATE_KEYS[item.state])}{item.summary ? ` · ${item.summary}` : ''}</p>
       </div>)}
       {/* No `onOpen`: every running row renders, uncapped. */}
-      {!boardStands && data.running > 0 && <TileList tile="progress" data={data} />}
+      {!crewMain && !boardStands && data.running > 0 && <TileList tile="progress" data={data} />}
       </div>
     </div>
     </div>
