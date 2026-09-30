@@ -271,6 +271,7 @@ function createGatewaySupervisor({
   const {
     windowsRealpath,
     isTrustedWindowsGatewayCommand,
+    posixDescendantPids,
     winListenPids,
     lsofListenPids,
     psCommand,
@@ -1212,7 +1213,22 @@ function createGatewaySupervisor({
       try { gateway.kill(signal); }
       catch (error) { glog(`${signal} failed: ${error && error.message}`); }
     };
-    if (!IS_WIN || !gateway.pid) { killPid(); return; }
+    if (!gateway.pid) { killPid(); return; }
+    if (!IS_WIN) {
+      // The child may be a launcher that forked the real gateway (a package
+      // manager's shim) instead of exec'ing it. Killing only the child leaves
+      // that gateway alive, re-parented to init, holding the port and lock --
+      // and a PPID-1 holder is then treated as service-managed and never
+      // evicted. List the tree BEFORE the kill re-parents it.
+      const descendants = await posixDescendantPids(gateway.pid);
+      for (const pid of descendants) {
+        try { processObj.kill(pid, signal); }
+        catch (error) { glog(`${signal} descendant pid=${pid} failed: ${error && error.message}`); }
+      }
+      if (descendants.length) glog(`${signal} sent to ${descendants.length} descendant(s) of pid=${gateway.pid}`);
+      killPid();
+      return;
+    }
     try {
       await windowsTaskkill(gateway.pid, {
         isTrustedCommand: isTrustedWindowsGatewayCommand,
