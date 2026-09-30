@@ -401,6 +401,33 @@ class MessagingTransport(ABC):
         """
         return bool(self.capabilities.supports_session_resume)
 
+    def direct_peer_of(self, conversation_id: str) -> str:
+        """The platform identity of the ONE human in *conversation_id*, or ``""``.
+
+        Answers only when this transport can attest FROM ITS OWN STATE that
+        *conversation_id* is a 1:1 direct conversation and which person it is
+        with: the DM it opened for that person (:meth:`resolve_conversation`), or
+        one an authorized message arrived from. ``""`` means "cannot attest" and
+        covers a room, a thread, a group, an id this process never placed, and a
+        transport that keeps no such record -- never "nobody is authorized".
+
+        The reader is session control's owner-DM audience predicate
+        (``dashboard.session_control.owner_dm_refusal``): a persisted mirror
+        ``ChannelLink`` records a conversation id but not the principal behind
+        it, and whether the two are the same string is a per-platform fact (a
+        Telegram private ``chat_id`` IS the ``user_id``; a Discord DM channel id
+        is not). The predicate compares the answer against the roster's sole
+        ``user:`` target, so this hook names the peer and decides nothing about
+        authorization itself.
+
+        Synchronous and in-memory like :meth:`may_send_to`: it runs inside
+        session-control gates that must not suspend, so a transport that would
+        need a round trip to answer returns ``""`` instead. Default ``""`` is the
+        fail-closed answer, so a transport that does not override it grants
+        nothing.
+        """
+        return ""
+
     # -- Inbound adapter ----------------------------------------------------
     @abstractmethod
     async def receive(self, raw_envelope: Any) -> None:

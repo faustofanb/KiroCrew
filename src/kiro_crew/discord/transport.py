@@ -445,6 +445,25 @@ class DiscordTransport(MessagingTransport):
             return SendPermission.revoked()
         return SendPermission.unattributable()
 
+    def direct_peer_of(self, conversation_id: str) -> str:
+        """The user this DM channel belongs to, from the client's own pairing alone.
+
+        A Discord DM link persists the channel id ``create_dm_channel`` returned,
+        which is unrelated to the user snowflake, so the peer has to come from the
+        record that call (and an authorized inbound DM) leaves --
+        ``cached_dm_recipient``, the same pairing :meth:`_still_may_send_to`
+        decides on. Every writer of that pairing is DM-gated, so an answer is also
+        the statement that the id is a DM channel and not a guild one; a guild
+        channel or thread id is never paired and reads ``""``.
+
+        In-process only, by the pairing's own contract: a DM opened before a
+        restart names nobody until the bot re-opens it or the peer writes into it,
+        and the reader treats ``""`` as "not on record" rather than guessing.
+        """
+        if not conversation_id:
+            return ""
+        return self._client.cached_dm_recipient(conversation_id) or ""
+
     # -- Lifecycle ----------------------------------------------------------
     async def connect(self) -> None:
         await self._client.start()
