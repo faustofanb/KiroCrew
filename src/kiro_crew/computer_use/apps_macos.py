@@ -83,6 +83,22 @@ MAX_INFO_PLIST_BYTES = 512 * 1024
 IDENTITY_CACHE_TTL_SECS = 60.0
 MAX_CACHED_IDENTITIES = 64
 
+# The ``kCGWindowOwnerName`` of the Dock process. It is a cheap PRE-FILTER only,
+# never an identity: ``kCGWindowOwnerName`` is attacker-chooseable (any process
+# can call itself "Dock"), so a match is confirmed against the owning pid's real
+# executable path (see ``_DOCK_EXECUTABLE_PATH`` and ``_is_dock_backstop``) before
+# the window is ever looked past.
+_DOCK_OWNER_NAME = "Dock"
+
+# The absolute executable path of the genuine system Dock. ``_is_dock_backstop``
+# resolves the owning window's pid with ``proc_pidpath`` and requires it to equal
+# this path before passing the window through: the only thing a confined
+# ``global`` click is allowed to be delivered past is the REAL Dock's backstop,
+# not a window an unauthorized process merely named "Dock". The path is fixed by
+# macOS (the Dock ships inside the OS and launches from here on every release),
+# so an exact match is both correct and the tightest possible identity test.
+_DOCK_EXECUTABLE_PATH = "/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock"
+
 
 @dataclass(frozen=True)
 class AppIdentity:
@@ -477,7 +493,8 @@ def pid_owns_point(pid: int, x: float, y: float) -> bool:
     an irreversible action in an app the operator never authorized.
     """
     try:
-        for info in macos_ffi.window_list():
+        windows = macos_ffi.window_list()
+        for info in windows:
             bounds = info.bounds
             if bounds is None:
                 # Cannot place this window, so cannot prove it does NOT cover the
@@ -486,14 +503,27 @@ def pid_owns_point(pid: int, x: float, y: float) -> bool:
             left, top, width, height = bounds
             if not (left <= x < left + width and top <= y < top + height):
                 continue
-            # FIRST containing window in z-order wins, whatever its layer. A
-            # non-normal window is NOT skipped here, which is the opposite of what
-            # ``list_apps`` does and deliberately so: this function answers "what
-            # would a physical click at this pixel hit?", and a notification banner,
-            # a menu-bar extra or an open menu sitting above the authorized app
-            # really would receive that click. Skipping those layers let the app
-            # UNDERNEATH grant permission for a click the operator's own overlay was
-            # about to swallow — the very confinement this function exists to
+            if _is_dock_backstop(info, bounds):
+                # The Dock keeps a full-screen backing window anchored at the
+                # screen's top-left corner, above every layer-0 app window. It is
+                # transparent and click-THROUGH everywhere except the Dock strip,
+                # so a physical click at this pixel passes STRAIGHT through it to
+                # the window underneath — the window server's hit test ignores it.
+                # "rectangle contains point" is only a stand-in for that hit test,
+                # and this backstop is exactly where the two diverge: honouring it
+                # refuses every point on the display for every app. The Dock STRIP
+                # is a separate, smaller Dock window that does not span the whole
+                # display, so it is not matched here and still blocks a click that
+                # would really land on it.
+                continue
+            # FIRST remaining containing window in z-order wins, whatever its
+            # layer. A non-normal window is NOT skipped here, which is the opposite
+            # of what ``list_apps`` does and deliberately so: this function answers
+            # "what would a physical click at this pixel hit?", and a notification
+            # banner, a menu-bar extra or an open menu sitting above the authorized
+            # app really would receive that click. Skipping those layers let the
+            # app UNDERNEATH grant permission for a click the operator's own overlay
+            # was about to swallow — the very confinement this function exists to
             # provide. ``list_apps`` skips them for the unrelated reason that they
             # are not addressable TARGETS.
             return info.pid == pid and info.layer == macos_ffi.CG_WINDOW_LAYER_NORMAL
@@ -501,6 +531,89 @@ def pid_owns_point(pid: int, x: float, y: float) -> bool:
     except Exception:
         logger.debug("point ownership check failed; refusing", exc_info=True)
         return False
+
+
+def _is_dock_backstop(
+    info: "macos_ffi.WindowInfo",
+    bounds: "tuple[float, float, float, float]",
+) -> bool:
+    """Is *info* the Dock's transparent, click-through, full-screen backstop?
+
+    The only window ``pid_owns_point`` passes through. The predicate is bound as
+    tightly as the window list allows so it can never match a real application
+    window, the Dock STRIP, or an INTERACTIVE Dock-owned overlay:
+
+    * ``owner_name == "Dock"`` AND the owning pid's executable resolves to the
+      genuine system Dock (``_DOCK_EXECUTABLE_PATH``). The owner name alone is
+      attacker-chooseable — any local process can present a window whose
+      ``kCGWindowOwnerName`` is "Dock" — so it is only a cheap pre-filter; the
+      authorization rests on resolving ``info.pid`` with ``proc_pidpath`` and
+      requiring the exact system Dock executable path. Without this, a process
+      named "Dock" showing an origin-anchored full-screen level-20 window would
+      be skipped and a confined ``global`` click delivered to it — the exact
+      mis-delivery this guard exists to refuse. The window TITLE
+      (``kCGWindowName``) is deliberately NOT used: CoreGraphics omits it unless
+      the calling process holds the Screen Recording grant, which computer-use
+      never requires, so a title match would make the whole guard inert on an
+      ungranted host.
+    * ``layer == CG_WINDOW_LAYER_DOCK`` (exactly 20) — the one level the backstop
+      uses. Pinning the exact level, not "any non-normal layer", is what keeps an
+      INTERACTIVE Dock-owned surface (Launchpad, the Mission Control overlay) from
+      matching: those are Dock-owned and full-screen too, but render at other
+      window levels, so a confined click over them is still refused. This is the
+      narrowest match the evidence supports and does the exclusion the title
+      cannot be relied on to do.
+    * its bounds EQUAL the main display's rectangle (``macos_ffi.main_display_bounds``).
+      Equality to the real display, not a shape inferred from neighbouring
+      windows: inferring "full screen" from neighbours cannot separate a
+      full-display backstop from a thin Dock STRIP without either over-refusing
+      (a neighbour straddling the display edge vetoes the real backstop) or
+      opening a hole (treating such a neighbour as non-evidence leaves nothing to
+      exclude the strip). The display rectangle is exact — the backstop equals it,
+      the Dock strip (a thin bar) never does, and a strip touching the top-left
+      origin still fails the size equality. ``main_display_bounds`` returns
+      ``None`` when the display cannot be read, so an unreadable display refuses.
+
+    SCOPE: only the MAIN display's backstop is matched (``CGMainDisplayID``). A
+    SECONDARY display's own backstop sits at that display's own origin with that
+    display's size, so it will not equal the main-display rectangle and the guard
+    stays fully closed on secondary displays (the original over-refusal persists
+    there rather than opening a hole). Widening to per-display backstops needs
+    enumerating every display (``CGGetActiveDisplayList``) and a live multi-monitor
+    run, which this change does not add.
+
+    Failing this predicate keeps the guard fully closed, the safe default: a
+    window that is not provably this backstop is treated as a real overlay.
+    """
+    left, top, width, height = bounds
+    if info.owner_name != _DOCK_OWNER_NAME:
+        return False
+    if macos_ffi.executable_path(info.pid) != _DOCK_EXECUTABLE_PATH:
+        # The owner name is a spoofable string; the pid's real executable is not.
+        # A window merely NAMED "Dock" by an unauthorized process resolves to some
+        # other binary (or to "" when the pid cannot be inspected), so it is never
+        # passed through and the confined click stays refused over it.
+        return False
+    if info.layer != macos_ffi.CG_WINDOW_LAYER_DOCK:
+        return False
+    # Match the backstop by EQUALITY to the real main-display rectangle, not by
+    # inferring "full screen" from neighbouring windows. Inferring it cannot tell
+    # a full-display backstop from a thin Dock STRIP without either over-refusing
+    # (a neighbour straddling the display edge vetoes the real backstop) or
+    # opening a hole (making such a neighbour non-evidence leaves nothing to
+    # distinguish the strip). The display rectangle is exact: the backstop equals
+    # it, the Dock strip never does (it is a thin bar), and a left/top-placed
+    # strip reaching the origin still fails the size equality. ``main_display_bounds``
+    # fails closed (``None``) when the display cannot be read, so an unreadable
+    # display refuses rather than guesses.
+    display = macos_ffi.main_display_bounds()
+    if display is None:
+        return False
+    d_left, d_top, d_width, d_height = display
+    # Exact to the pixel: CoreGraphics reports both the display rect and window
+    # bounds as integer points, so no tolerance is needed, and a tolerance would
+    # only widen what can be mistaken for the backstop.
+    return left == d_left and top == d_top and width == d_width and height == d_height
 
 
 __all__ = [

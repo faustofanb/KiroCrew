@@ -212,6 +212,15 @@ CG_BOUNDS_H = "Height"
 # shadows live on other layers and their owning pid is often a system agent.
 CG_WINDOW_LAYER_NORMAL = 0
 
+# ``kCGDockWindowLevel`` — the exact window level the Dock process gives its
+# full-display, click-through backing window (the "backstop"). Pinned to this one
+# value rather than "any non-normal layer": the Dock process also owns INTERACTIVE
+# full-screen surfaces (Launchpad, the Mission Control overlay) that must keep
+# blocking a confined click, and those run at other levels, so matching only this
+# level is the narrowest match the evidence supports and the one least able to
+# swallow an interactive overlay.
+CG_WINDOW_LAYER_DOCK = 20
+
 # ── CoreGraphics event ABI constants ──
 # ``kCGEventSourceStatePrivate``. NEVER pass NULL: an event built from the default
 # (HID) source inherits the user's live modifier state, which is the measured
@@ -437,6 +446,15 @@ _FN_SPECS: tuple[tuple[str, str, Any, list[Any]], ...] = (
     # ── CoreGraphics: window list + capture ──
     (LIB_CG, "CGWindowListCopyWindowInfo", c_void_p, [c_uint32, c_uint32]),
     (LIB_CG, "CGWindowListCreateImage", c_void_p, [CGRect, c_uint32, c_uint32, c_uint32]),
+    # Main-display bounds. ``pid_owns_point`` needs the real display rectangle to
+    # recognise the Dock's full-screen backstop EXACTLY (bounds == the display),
+    # instead of inferring "full screen" from neighbouring windows — which cannot
+    # tell a full-display backstop from a thin Dock strip without a dead-code or
+    # over-refusal hazard. ``CGMainDisplayID`` returns a ``CGDirectDisplayID``
+    # (a ``uint32``); ``CGDisplayBounds`` returns that display's ``CGRect`` in
+    # global screen coordinates (the main display's origin is always 0,0).
+    (LIB_CG, "CGMainDisplayID", c_uint32, []),
+    (LIB_CG, "CGDisplayBounds", CGRect, [c_uint32]),
     (LIB_CG, "CGImageGetWidth", c_size_t, [c_void_p]),
     (LIB_CG, "CGImageGetHeight", c_size_t, [c_void_p]),
     (LIB_CG, "CGImageRelease", _VOID, [c_void_p]),
@@ -1486,6 +1504,30 @@ def executable_path(pid: int) -> str:
     return buf.value.decode("utf-8", "replace")
 
 
+def main_display_bounds() -> "tuple[float, float, float, float] | None":
+    """The main display's ``(left, top, width, height)`` rect, or ``None``.
+
+    ``CGMainDisplayID`` + ``CGDisplayBounds`` give the exact display rectangle in
+    global screen coordinates (the main display's origin is ``(0, 0)``). The Dock
+    backstop recognition in :func:`apps_macos.pid_owns_point` needs the REAL
+    display size so it can match the backstop by equality rather than infer "full
+    screen" from neighbouring windows. Returns ``None`` on any failure or a
+    degenerate (zero-area) rect, so the caller fails CLOSED — a confinement guard
+    that cannot read the display must refuse, never guess.
+    """
+    try:
+        libs = _frameworks()
+        display_id = int(libs.cg.CGMainDisplayID())
+        rect = libs.cg.CGDisplayBounds(display_id)
+        width = float(rect.size.width)
+        height = float(rect.size.height)
+        if width <= 0 or height <= 0:
+            return None
+        return (float(rect.origin.x), float(rect.origin.y), width, height)
+    except Exception:
+        return None
+
+
 # ── CoreGraphics: event synthesis ──
 
 
@@ -2056,6 +2098,7 @@ __all__ = [
     "ELECTRON_OPT_IN_POLL_SECS",
     "ELECTRON_OPT_IN_WAIT_SECS",
     "CG_WINDOW_LAYER_NORMAL",
+    "CG_WINDOW_LAYER_DOCK",
     "Libs",
     "TypeIds",
     "WindowInfo",
@@ -2087,6 +2130,7 @@ __all__ = [
     "executable_path",
     "frameworks",
     "jpeg_dimensions",
+    "main_display_bounds",
     "mouse_button_codes",
     "post_key",
     "post_mouse_click",

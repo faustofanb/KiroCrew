@@ -542,6 +542,8 @@ class _FakeCG:
 
         self.CGWindowListCopyWindowInfo = _FakeFn(self._window_info)
         self.CGWindowListCreateImage = _FakeFn(self._create_image)
+        self.CGMainDisplayID = _FakeFn(lambda: 1)
+        self.CGDisplayBounds = _FakeFn(self._display_bounds)
         self.CGImageGetWidth = _FakeFn(lambda ref: 1280)
         self.CGImageGetHeight = _FakeFn(lambda ref: 1008)
         self.CGImageRelease = _FakeFn(self._image_release)
@@ -562,6 +564,10 @@ class _FakeCG:
     def _window_info(self, options, window_id):
         self.calls.append(("CGWindowListCopyWindowInfo", (_num(options), _num(window_id))))
         return self.window_list_handle
+
+    def _display_bounds(self, display_id):
+        self.calls.append(("CGDisplayBounds", (_num(display_id),)))
+        return macos_ffi.CGRect(macos_ffi.CGPoint(0.0, 0.0), macos_ffi.CGSize(1280.0, 1008.0))
 
     def _create_image(self, rect, options, window_id, image_options):
         self.calls.append(
