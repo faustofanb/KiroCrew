@@ -623,11 +623,11 @@ export function prepareSendPayload(raw: string, pendingFiles: string[]): SendPay
   // on every surface that replays stored content — dashboard re-render after a
   // turn, gateway restart, Slack replay, exports — not just the in-memory
   // optimistic bubble. The extra blank line is safe for image attachment: the
-  // ACP path (kiro-cli) extracts images in AcpClient._send_prompt by matching
-  // the absolute file path and inlines them as a base64 `image` content block.
-  // It is newline-agnostic and pulls the image into its own content block, so
-  // the surrounding whitespace never changes what the model receives. The
-  // caption keeps a single '\n' to its appended [attached_file N] tokens.
+  // picture reaches the model through the send's `meta.images` list (the
+  // gateway builds one image block per entry and never scans the text for
+  // paths), so the surrounding whitespace never changes what the model
+  // receives. The caption keeps a single '\n' to its appended
+  // [attached_file N] tokens.
   const textBody = [llmRaw, unreferencedTokens].filter(Boolean).join('\n')
   return {
     txt: [imgMd, textBody].filter(Boolean).join('\n\n'),
@@ -683,14 +683,10 @@ export interface RestoredComposerState {
  * behavior was).
  *
  * Provably lossless claims, and nothing more:
- *  - The producer's LEADING image block — `![image](dest)` lines at the very
- *    start of the content, one per line, ending at the `\n\n` paragraph
- *    break `prepareSendPayload` joins with (or at end of content). Claimed
- *    all-or-nothing: every line must recover an absolute image path, since
- *    the producer never emits anything else there. mdImageDest's `<…>` wrap
- *    makes each destination boundary exact, spaces included. An own-line
- *    image ANYWHERE ELSE is the user's own markdown and stays verbatim —
- *    position alone distinguishes producer output from user content.
+ *  - The producer's LEADING `![image](dest)` block, and only when `images`
+ *    (the structured list the send carried as `meta.images`) names every
+ *    path in it. Image-shaped prose alone is not evidence of a staged
+ *    picture: a typed image line stays verbatim, as the gateway treats it.
  *  - An own-line `[attached_file N] <token>` whose remainder is a single
  *    whitespace-free token, with N ≥ 1 (the producer indexes from 1) and N
  *    unclaimed (the producer emits each index once) and the path absolute.
@@ -733,21 +729,17 @@ export interface RestoredComposerState {
  * entry without a list (a legacy entry, an older gateway) takes the shape
  * rules above unchanged. The round-trip arbiter gates both paths.
  */
-export function restoreQueuedContent(content: string, files?: readonly string[]): RestoredComposerState {
+export function restoreQueuedContent(
+  content: string, files?: readonly string[], images?: readonly string[],
+): RestoredComposerState {
   const staged: string[] = []
   let text = content
 
-  // Image lines are claimed ONLY as the producer's leading block, and only
-  // all-or-nothing: prepareSendPayload never emits an image line anywhere
-  // else, and never emits one with a relative or non-image path — so a block
-  // failing either test is foreign text (the user's own markdown) and stays
-  // verbatim, as does an own-line image later in the content. The block match
-  // consumes its own `\n\n` terminator, so nothing is stripped afterwards.
   const block = IMG_BLOCK_RE.exec(content)
-  if (block) {
+  if (block && images?.length) {
     const lines = block[0].replace(/\n+$/, '').split('\n')
     const paths = lines.map((l) => mdImageDestToPath(IMG_LINE_RE.exec(l)?.[1] ?? ''))
-    if (paths.every((p) => IMG_EXT.test(p) && RESTORABLE_PATH_RE.test(p))) {
+    if (paths.every((p) => images.includes(p) && IMG_EXT.test(p) && RESTORABLE_PATH_RE.test(p))) {
       staged.push(...paths)
       text = content.slice(block[0].length)
     }
