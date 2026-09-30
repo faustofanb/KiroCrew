@@ -2725,6 +2725,7 @@ class _ChatSlot:
         "_mcp_report",
         "_mcp_report_session_id",
         "_on_message",
+        "_on_row",
         "_on_card_event",
         "_dashboard_card_identity",
         "_on_question_retired",
@@ -3323,6 +3324,15 @@ class _ChatSlot:
         self._mcp_report_session_id: str = ""
         # Callback for broadcasting messages via global SSE
         self._on_message: object | None = None  # Callable[[str, dict], None] | None
+        # Every appended row, RECORDED rather than rendered: Callable[[str,
+        # dict], None] | None, wired by DashboardState like _on_message. Kept
+        # apart from it deliberately — _on_message is the SSE delivery hook and
+        # is skipped for a row some other surface already rendered (a user row
+        # the composer echoed optimistically) or for a slot with its own HTTP
+        # stream reader. Neither says anything about whether the row happened,
+        # so a durable record hung off that hook loses exactly the rows a
+        # person typed.
+        self._on_row: object | None = None
         self._on_card_event: object | None = None
         self._dashboard_card_identity = uuid.uuid4().hex
         # Announce stateless question cards this slot retires, so every client
@@ -4788,6 +4798,28 @@ class _ChatSlot:
             and not self._has_reader
         ):
             self._on_message(self.key, msg)  # type: ignore[operator]
+        # Record the row, which is a different question from delivering it. The
+        # gate above answers "does anything still need to render this?"; this
+        # one answers "did this row happen?", so the only conditions it may
+        # share are the two that make a row not a row at all:
+        #
+        #  * the wire-only roles — `chunk` is one streamed token, `done` and
+        #    `streaming` are markers — none of which is ever persisted, and
+        #  * `broadcast`, which is what separates a live append from a REPLAY
+        #    (`channel_slots._rebuild_window`, `chat_fork`, `session_transfer`
+        #    all re-append historical rows with broadcast=False). Recording a
+        #    replay would stamp a member as active just now for a message sent
+        #    hours ago and reorder the roster on a rotation recovery.
+        #
+        # Notably NOT shared: `role != "user" or broadcast_user` and
+        # `_has_reader`. A user row IS the event the roster's recency exists to
+        # order by, and the composer having drawn its own bubble is not a reason
+        # to forget it happened.
+        if broadcast and self._on_row and role not in _WIRE_ONLY_ROLES:
+            try:
+                self._on_row(self.key, msg)  # type: ignore[operator]
+            except Exception:
+                logger.debug("slot row hook failed", exc_info=True)
         # Trim old messages to bound memory usage
         if len(self.messages) > _MAX_SLOT_MESSAGES:
             excess = len(self.messages) - _MAX_SLOT_MESSAGES
@@ -7598,6 +7630,7 @@ class DashboardState:
             slot.title = pretty_title
         slot._tab_id = uuid.uuid4().hex[:12]
         slot._on_message = self._broadcast_chat_message
+        slot._on_row = self._record_member_row
         slot._on_card_event = self.notify_dashboard_card
         slot._on_question_retired = self._broadcast_question_retired
         slot._coordinator_approvals = self.pending_coordinator_approvals
@@ -7860,58 +7893,79 @@ class DashboardState:
         if direct_meta and isinstance(direct_meta, dict):
             payload["meta"] = {**(payload.get("meta") or {}), **direct_meta}
         self._broadcast(payload)
-        # Best-effort per-member event log: a message in a member DM thread.
+
+    def _record_member_row(self, slot_key: str, msg: dict) -> None:
+        """Append one ``member/message`` for a row landing in a member DM slot.
+
+        Wired as ``Slot._on_row``, which fires for EVERY live appended row, and
+        deliberately NOT off ``_broadcast_chat_message``: that method is the SSE
+        delivery path and is skipped for a ``user`` row the dashboard composer
+        already echoed, and for any row on a slot with an HTTP stream reader
+        attached. The roster's ``last_active_ts`` is folded from these events, so
+        a recorder reachable only through the delivery path cannot see the one
+        action the user most expects to reorder the roster: typing into a
+        crewmate's DM.
+
+        Nothing outside a member DM slot is recorded: ``member_slug_for_slot``
+        answers ``None`` for every other key.
+
+        Best-effort throughout, deliberately: a logging fault must not break a
+        message the user has already sent.
+        """
+        role = msg.get("role", "")
+        content = msg.get("content", "")
         try:
             from kiro_crew import eventlog_hooks
             from kiro_crew.eventlog.types import MEMBER_MESSAGE
 
             _mslug = eventlog_hooks.member_slug_for_slot(slot_key)
-            if _mslug is not None:
-                _raw_ts = msg.get("ts", "")
-                try:
-                    _ev_ts = float(_raw_ts)
-                except (TypeError, ValueError):
-                    _ev_ts = time.time()
+            if _mslug is None:
+                return
+            _raw_ts = msg.get("ts", "")
+            try:
+                _ev_ts = float(_raw_ts)
+            except (TypeError, ValueError):
+                _ev_ts = time.time()
 
-                # Same redaction chain the members roster read uses, run
-                # before the length cap so a credential split by truncation
-                # cannot leak. The payload is built by the one shared spelling
-                # (`member_message_payload` -> `speech_preview`) so the folded
-                # preview equals what `GET /api/members` reads back.
-                def _sanitize_preview(text: str) -> str:
-                    text, _ = redact_exfiltration_urls(text)
-                    text, _ = redact_credentials(text)
-                    return text
+            # Same redaction chain the members roster read uses, run
+            # before the length cap so a credential split by truncation
+            # cannot leak. The payload is built by the one shared spelling
+            # (`member_message_payload` -> `speech_preview`) so the folded
+            # preview equals what `GET /api/members` reads back.
+            def _sanitize_preview(text: str) -> str:
+                text, _ = redact_exfiltration_urls(text)
+                text, _ = redact_credentials(text)
+                return text
 
-                _payload = eventlog_hooks.member_message_payload(
-                    role, content, msg.get("meta"), _ev_ts, sanitize=_sanitize_preview
+            _payload = eventlog_hooks.member_message_payload(
+                role, content, msg.get("meta"), _ev_ts, sanitize=_sanitize_preview
+            )
+
+            # Off the event loop: emit opens the member log and does a
+            # synchronous os.fsync append. This callback runs loop-side, so
+            # hand the write to a worker thread (fire-and-forget, best-effort
+            # like the rest of this block) rather than stalling every gateway
+            # task on the fsync.
+            def _emit_message() -> None:
+                eventlog_hooks.emit(
+                    _mslug,
+                    None,
+                    MEMBER_MESSAGE,
+                    _payload,
                 )
 
-                # Off the event loop: emit opens the member log and does a
-                # synchronous os.fsync append. This callback runs loop-side, so
-                # hand the write to a worker thread (fire-and-forget, best-effort
-                # like the rest of this block) rather than stalling every gateway
-                # task on the fsync.
-                def _emit_message() -> None:
-                    eventlog_hooks.emit(
-                        _mslug,
-                        None,
-                        MEMBER_MESSAGE,
-                        _payload,
-                    )
-
-                # Queued on the ordered executor either way -- see the slot
-                # emit for why a no-loop caller queues rather than writing
-                # inline.
-                #
-                # The return is deliberately not read, and this is the ONE thing
-                # that makes it safe: nothing here records that the event was
-                # written. A refused or failed append costs this path exactly the
-                # event it was given, which the queue's own ceiling documents and
-                # reports. The slot path above cannot do the same because it keeps
-                # a checkpoint, and a checkpoint that outlives a lost append turns
-                # one missing event into a view that never recovers.
-                eventlog_hooks.submit(_emit_message)
+            # Queued on the ordered executor either way -- see the slot
+            # emit for why a no-loop caller queues rather than writing
+            # inline.
+            #
+            # The return is deliberately not read, and this is the ONE thing
+            # that makes it safe: nothing here records that the event was
+            # written. A refused or failed append costs this path exactly the
+            # event it was given, which the queue's own ceiling documents and
+            # reports. The slot path above cannot do the same because it keeps
+            # a checkpoint, and a checkpoint that outlives a lost append turns
+            # one missing event into a view that never recovers.
+            eventlog_hooks.submit(_emit_message)
         except Exception:
             logger.debug("member/message event-log hook failed", exc_info=True)
 

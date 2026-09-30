@@ -453,7 +453,7 @@ function MemberRow({
   // pushed value. `running` is intentionally NOT overridden — it is live
   // presence, resolved from slots in the parent.
   //
-  // The two MESSAGE fields go the other way, and the direction is the point.
+  // `last_message` goes the other way, and the direction is the point.
   // Every other field here is config-derived, so the event log is where it is
   // written and the projection IS the record. A message preview is not: the
   // server row carries it from the conversation transcript, which is the store
@@ -464,6 +464,11 @@ function MemberRow({
   // payload -- and nothing on the card says which of the two it is showing. The
   // projection still fills in when the row has no transcript value at all, which
   // is what a pushed frame is for.
+  //
+  // `last_active_ts` takes the GREATER of the two instead, matching the merged
+  // list above: both are readings of the one folded value (the server row reads
+  // it off the same roster projection), so the newer reading is simply the
+  // right one, and max keeps a frozen baseline from walking a row backwards.
   const view: MemberRosterRow = roster
     ? {
         ...m,
@@ -475,12 +480,26 @@ function MemberRow({
         starred: roster.starred ?? m.starred,
         avatar: roster.avatar ?? m.avatar,
         slot_key: roster.slot_key ?? m.slot_key,
-        last_active_ts: m.last_active_ts || roster.last_active_ts,
+        last_active_ts: Math.max(m.last_active_ts ?? 0, roster.last_active_ts ?? 0) || undefined,
         last_message: m.last_message || roster.last_message,
       }
     : m
+  // `layout` on the row, so the ONE move the recency re-sort makes is
+  // followable: a row relocating to the top on the user's own send is a
+  // persistent, already-identified element changing place, and an instant
+  // teleport makes the reader re-find it. Keyed by the crew NAME (the row's
+  // identity), which is what lets framer measure the same element across the
+  // re-order. Off under reduced motion — the row still lands in its new place,
+  // it just does not travel — and `layout="position"` so only the offset is
+  // animated, never the row's size, which would fight the star and the preview
+  // reflowing in the same frame.
   return (
-      <li key={view.name} className="group/row relative">
+      <motion.li
+        key={view.name}
+        layout={reduceMotion ? false : 'position'}
+        transition={{ type: 'spring', stiffness: 520, damping: 42 }}
+        className="group/row relative"
+      >
         {/* ChatSidebar's own row recipe (components/listShell), so the
             two conversation lists read as one family; pr-8 widens the
             right padding over ROW_BOX_CLS's pr-3 to hold the star. The
@@ -651,7 +670,7 @@ function MemberRow({
             {...(view.starred ? { fill: 'var(--accent)', stroke: 'none' } : {})}
           />
         </button>
-      </li>
+      </motion.li>
   )
 }
 
@@ -771,18 +790,35 @@ export default function MembersPage() {
           // row's identity across a shared-slug pair (MemberRow excludes them
           // for the same reason).
           if (key === 'name' || key === 'slug') continue
-          // The two MESSAGE fields are the other exception, and the direction is
-          // the point. Every other key here is config-derived, so the event log is
-          // where it is written and the projection IS the record. A message preview
-          // is not: the row carries it from the conversation transcript, the store
-          // the message was persisted through, and the member/message event is a
-          // second copy appended afterwards on a best-effort hook. A refused append
-          // leaves the projection holding the PREVIOUS message, so letting it win
-          // renders a stale preview over the fresh value sitting beside it in the
-          // same payload. The projection still fills in when the row has no
+          // `last_message` is the one field the projection does NOT get to win,
+          // and the direction is the point. Every other key here is
+          // config-derived, so the event log is where it is written and the
+          // projection IS the record. A message preview is not: the row carries
+          // it from the conversation transcript, the store the message was
+          // persisted through, and the member/message event is a second copy
+          // appended afterwards on a best-effort hook. A refused append leaves
+          // the projection holding the PREVIOUS message, so letting it win
+          // renders a stale preview over the fresh value sitting beside it in
+          // the same payload. The projection still fills in when the row has no
           // transcript value at all, which is what a pushed frame is for.
-          if (key === 'last_message' || key === 'last_active_ts') {
+          if (key === 'last_message') {
             if (!r[key]) (merged as Record<string, unknown>)[key] = v[key]
+            continue
+          }
+          // Recency takes the GREATER of the two, which is the only rule that
+          // lets a live frame move a row. The server row carries the folded
+          // `last_active_ts` itself (`api_members` reads it off the same roster
+          // projection, floored by the transcript), so the two are readings of
+          // ONE value at two moments: the row's is this refetch's, the
+          // projection's is the newest pushed frame's. Preferring the row's
+          // would freeze the pushed frame out, so a send that advanced recency
+          // could not reorder the list until the next refetch; preferring the
+          // projection's would let a lagging baseline walk a row back. Max is
+          // monotone, so neither can happen.
+          if (key === 'last_active_ts') {
+            const pushed = typeof v[key] === 'number' ? (v[key] as number) : 0
+            const own = typeof r[key] === 'number' ? (r[key] as number) : 0
+            if (pushed > own) (merged as Record<string, unknown>)[key] = pushed
             continue
           }
           const pv = v[key]
@@ -1270,35 +1306,69 @@ export default function MembersPage() {
   // Display order before the search filter — this is the roster the rows
   // render from and the list `resolveDefaultMember` searches for a remembered
   // member, so a typed filter never changes the order or which member a
-  // return visit restores. The ORDER is committed per MEMBERSHIP and
-  // per chosen SORT, not per refetch: the roster query refetches on every
-  // server refresh frame, on window focus and on staleness, and re-sorting
-  // when a last_active_ts advances would move rows under the cursor mid-click
-  // — opening a different member's durable pinned thread. Row CONTENT (star,
-  // last-message preview, presence) still updates live from every refetch;
-  // only the ordering is held until a member is added, removed or renamed, or
-  // the user picks the other sort, which re-sorts from scratch.
-  const committedOrderRef = useRef<{ sort: MemberSort; names: string[] }>({ sort, names: [] })
+  // return visit restores (that lookup is by NAME, so a re-sort cannot change
+  // which member it finds).
+  //
+  // The order is HELD across refetches, and re-sorted on exactly three events:
+  // a membership change, the user picking the other sort, and the OPEN
+  // crewmate's recency advancing.
+  //
+  // The hold is what a refetch must not break. The roster query refetches on
+  // every server refresh frame, on window focus and on staleness; re-sorting
+  // when some background crewmate's `last_active_ts` advances would move rows
+  // under the cursor mid-click and open a different member's durable pinned
+  // thread. Row CONTENT (star, last-message preview, presence) still updates
+  // live from every refetch — only the ordering is held.
+  //
+  // The third event is what the hold must not swallow, and it is not a
+  // background one: the open crewmate's recency can only advance because of
+  // what the user just did in the thread in front of them — their own send, or
+  // the reply it started. Sorting by Recent and then watching the crewmate you
+  // are messaging sit in its alphabetical place is the whole of #15276. It
+  // settles after one move, because a row already at the top does not move
+  // again when its recency advances further. A row becoming the open one
+  // re-baselines the reading below WITHOUT re-sorting, so merely opening a
+  // member still never shuffles the list.
+  //
+  // And it moves that ONE ROW, by lifting it out of the committed order and
+  // putting it first — never by re-sorting the list. A whole re-sort would
+  // publish every recency that arrived since the order was committed, so a
+  // background crewmate that advanced quietly during this visit would jump too:
+  // the hold would be spent, in a frame the user caused but did not ask for, and
+  // rows WOULD move under the cursor. Lifting one row is also what the user's
+  // model says happened: I messaged this crewmate, so this crewmate is first.
+  // The other rows keep their positions relative to each other.
+  //
+  // Recency-ordered only. Under the by-name sort a recency advance says nothing
+  // about where a row belongs, so the lift does not run and the name order
+  // stands.
+  const committedOrderRef = useRef<{
+    sort: MemberSort
+    names: string[]
+    openName: string
+    openTs: number
+  }>({ sort, names: [], openName: '', openTs: 0 })
   const orderedMembers = useMemo(() => {
     const byName = new Map(members.map((m) => [m.name, m]))
-    // Recency for the sort comes from the RAW query rows, not the merged
-    // member: the pushed `roster` projection freezes last_active_ts at its
-    // baseline seq (a plain roster refetch re-seeds at the same seq and is
-    // dropped by higher-seq-wins), so sorting the merged value would hold the
-    // order stale across a membership change. The fresh row carries the
-    // authoritative last_active_ts a re-sort must read.
-    const tsByName = new Map(rows.map((r) => [r.name, r.last_active_ts ?? 0]))
     const prev = committedOrderRef.current
     const sameMembership =
       prev.sort === sort && prev.names.length === byName.size && prev.names.every((n) => byName.has(n))
-    // Sort on the raw-row recency (tsByName), not the projection-frozen merged
-    // value: sortRoster reads last_active_ts, and the merged member's is held
-    // stale by higher-seq-wins, so overlay the fresh row ts before sorting.
-    const forSort = members.map((m) => ({ ...m, last_active_ts: tsByName.get(m.name) ?? m.last_active_ts ?? 0 }))
-    const names = sameMembership ? prev.names : sortRoster(forSort, sort).map((m) => m.name)
-    committedOrderRef.current = { sort, names }
+    // Sorted on the MERGED member, which is the freshest reading of the one
+    // folded recency: the server row carries `last_active_ts` from the same
+    // roster projection, and the merge takes the greater of row and pushed
+    // frame, so the merged value leads the raw row rather than lagging it.
+    // Overlaying the raw rows here instead would discard every pushed frame the
+    // merge has already taken, which is the recency a re-sort exists to read.
+    const openTs = (activeName ? byName.get(activeName)?.last_active_ts : 0) ?? 0
+    const openAdvanced =
+      sort === 'recent' && !!activeName && activeName === prev.openName && openTs > prev.openTs
+    let names = sameMembership ? prev.names : sortRoster(members, sort).map((m) => m.name)
+    if (sameMembership && openAdvanced && names[0] !== activeName && byName.has(activeName)) {
+      names = [activeName, ...names.filter((n) => n !== activeName)]
+    }
+    committedOrderRef.current = { sort, names, openName: activeName, openTs }
     return names.map((n) => byName.get(n)).filter((m): m is MemberRosterRow => !!m)
-  }, [members, rows, sort])
+  }, [members, sort, activeName])
   // Named apart from `rosterQuery` above: that one is the React Query READ of
   // the roster, this one is the user's filter/sort question asked of it.
   const rosterFilterQuery = useMemo<RosterQuery>(

@@ -4806,6 +4806,107 @@ describe('MembersPage default member, memory and URL', () => {
     expect(names()).toEqual(['beta', 'gamma', 'alpha'])
   })
 
+  it('the OPEN crewmate rising to the top is the one recency change that re-sorts', async () => {
+    // #15276: sorted by Recent, typing into a crewmate's DM leaves the row in
+    // its alphabetical place. The user's own send is not a background event — it
+    // is the thing in front of them — so it is the one advance the order hold
+    // must not swallow. A pushed `member_projection` frame carries it, so this
+    // happens with NO roster refetch.
+    await renderPage([
+      row({ name: 'alpha', slug: 'alpha', last_active_ts: 900 }),
+      row({ name: 'beta', slug: 'beta', last_active_ts: 100 }),
+      row({ name: 'gamma', slug: 'gamma', last_active_ts: 500 }),
+    ])
+    const names = () =>
+      roster()
+        .getAllByRole('listitem')
+        .map((li) => within(li).queryByText(/^(alpha|beta|gamma)$/)?.textContent)
+        .filter(Boolean)
+    await waitFor(() => expect(names()).toEqual(['alpha', 'gamma', 'beta']))
+    const callsBefore = (api.members as ReturnType<typeof vi.fn>).mock.calls.length
+
+    // Open beta, the coldest row. Opening alone must NOT re-sort: the hold's
+    // whole point is that rows do not move as the user works the list.
+    fireEvent.click(await rosterRow('beta'))
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-beta'),
+    )
+    expect(names()).toEqual(['alpha', 'gamma', 'beta'])
+
+    // A background crewmate advances QUIETLY first, while the user works the
+    // list. This is the row the hold exists for: it must not move, and — the
+    // part a whole re-sort gets wrong — it must still not move when the open
+    // row's own advance arrives next. gamma's 9000 outranks everything, so a
+    // re-sort of the whole list would put gamma first, not beta.
+    act(() => {
+      memberProjectionStore.apply(
+        'gamma',
+        'roster',
+        { name: 'gamma', slug: 'gamma', last_active_ts: 9_000 },
+        4,
+      )
+    })
+    await waitFor(() => expect(names()).toEqual(['alpha', 'gamma', 'beta']))
+
+    // Now beta's recency advances — the user sent. seq > the baseline seed's
+    // asOfSeq (1), so higher-seq-wins takes it.
+    act(() => {
+      memberProjectionStore.apply(
+        'beta',
+        'roster',
+        { name: 'beta', slug: 'beta', last_active_ts: 4_000 },
+        5,
+      )
+    })
+    // ONE row moved. beta is first because the user messaged it; alpha and gamma
+    // keep the positions they held relative to each other, even though gamma now
+    // carries the greatest recency of the three.
+    await waitFor(() => expect(names()).toEqual(['beta', 'alpha', 'gamma']))
+    expect((api.members as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsBefore)
+
+    // A further background advance still moves nothing.
+    act(() => {
+      memberProjectionStore.apply(
+        'alpha',
+        'roster',
+        { name: 'alpha', slug: 'alpha', last_active_ts: 99_000 },
+        6,
+      )
+    })
+    await waitFor(() => expect(names()).toEqual(['beta', 'alpha', 'gamma']))
+  })
+
+  it('under the by-name sort a recency advance moves nothing', async () => {
+    // Recency is not what the name sort orders by, so the open crewmate's own
+    // send says nothing about where its row belongs. Lifting it to the top here
+    // would break the one ordering the user explicitly chose.
+    localStorage.setItem('mc-members-sort', 'name')
+    await renderPage([
+      row({ name: 'alpha', slug: 'alpha', last_active_ts: 100 }),
+      row({ name: 'beta', slug: 'beta', last_active_ts: 200 }),
+      row({ name: 'gamma', slug: 'gamma', last_active_ts: 300 }),
+    ])
+    const names = () =>
+      roster()
+        .getAllByRole('listitem')
+        .map((li) => within(li).queryByText(/^(alpha|beta|gamma)$/)?.textContent)
+        .filter(Boolean)
+    await waitFor(() => expect(names()).toEqual(['alpha', 'beta', 'gamma']))
+    fireEvent.click(await rosterRow('gamma'))
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-gamma'),
+    )
+    act(() => {
+      memberProjectionStore.apply(
+        'gamma',
+        'roster',
+        { name: 'gamma', slug: 'gamma', last_active_ts: 9_000 },
+        5,
+      )
+    })
+    await waitFor(() => expect(names()).toEqual(['alpha', 'beta', 'gamma']))
+  })
+
   it('restores the remembered member on return (and after a reload)', async () => {
     localStorage.setItem(LAST_MEMBER_KEY, 'beta')
     await renderPage(alphaBeta())
