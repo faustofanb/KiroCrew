@@ -506,6 +506,55 @@ def _folder_steering_turn(
     )
 
 
+def _slot_member_slug(slot_key: str) -> str:
+    """The slug a member DM slot key encodes, or ``""`` for a non-member key.
+
+    A member with a persisted identity gets an id-based slug, so its DM slot key
+    (``member-<member_id>``) carries that immutable id directly -- the one
+    identity source that survives BOTH a restart AND the removal of the original
+    member. The ``dm.json`` binding cannot serve this: ``read_dm_binding``
+    reports it absent whenever the encoded id fails to resolve in config (exactly
+    the reassignment case that matters). The transcript line is not consulted
+    either -- it is the operator-editable JSONL the pin must never re-derive
+    identity from. A legacy member's key carries a name-derived slug that equals
+    no member's id, so a caller comparing this against a resolved ``member_id``
+    only ever sees a divergence for a genuine stable-identity thread.
+    """
+    from kiro_crew import members as members_mod
+
+    return members_mod.slug_from_dm_slot_key(slot_key) or ""
+
+
+def _dm_member_binding_changed(bound_member_id: str, slot_key: str) -> bool:
+    """Whether a DM member thread's encoded id differs from the resolved alias.
+
+    The slot KEY is the one un-plantable identity a restored session carries
+    (the session's address, not the agent-writable metadata line). A DM slot
+    key encodes the member_id; when the alias resolves to a member whose id
+    differs, the thread belongs to a member the alias does not name, so the
+    carrier-less re-selection must refuse. Returns ``False`` when the slot key
+    encodes no id (an ordinary ``chat-N`` slot) -- there is nothing to compare,
+    and that case withholds the private store rather than refusing.
+    """
+    slot_member_slug = _slot_member_slug(slot_key)
+    return bool(bound_member_id) and bool(slot_member_slug) and bound_member_id != slot_member_slug
+
+
+def _private_store_is_unprovable(bound_member_id: str, slot_key: str) -> bool:
+    """Whether a restored restricted member re-selection cannot prove its store.
+
+    True when the alias resolves to a V2 member (``bound_member_id`` truthy --
+    the only kind with a private store to leak) but the slot key encodes no
+    un-plantable id to confirm the chat ran as that member (an ordinary
+    ``chat-N`` slot). The caller then refuses the turn: a restricted session
+    reads memory, so it may neither bind the member's private store (a
+    cross-member read) nor substitute the default store (reading Global memory
+    the chat did not run as). A legacy member (no persisted id) leaves
+    ``bound_member_id`` empty, so nothing private is at stake and this is False.
+    """
+    return bool(bound_member_id) and not _slot_member_slug(slot_key)
+
+
 def _require_session_memory_assignment(session_key: str, memory_store: str | None) -> None:
     """A captured execution outranks a later mutable member declaration."""
     from kiro_crew.execution_context import read_session_execution
@@ -11717,6 +11766,54 @@ async def _run_chat(
                     app=slot._app or "",
                     validate_memory_files=False,
                 )
+                # A RESTRICTED session (incognito/temporary) persists no durable
+                # execution carrier -- its line names no ``execution_context`` and
+                # no ``memory_store`` -- so ``previous_execution`` is None and this
+                # branch re-selects the member from the ALIAS the restored slot
+                # carries. The alias is mutable: a member removed and a new one
+                # created under the same name reassigns it to a DIFFERENT immutable
+                # id, and an incognito session READS memory, so a bare alias
+                # re-selection would bind the new member's PRIVATE store and
+                # surface memory this chat never ran as.
+                #
+                # Binding that private store is sound only when a durable identity
+                # the session itself carries -- one that is NOT the agent-writable
+                # metadata line, which the pin must never re-derive identity from
+                # -- confirms the alias still names the same member. The sole such
+                # identity is the slot KEY (the session's address, not an editable
+                # payload): a DM slot key encodes the member_id (id-based for a
+                # member with a persisted identity, durable across the original
+                # member's removal). An ordinary ``chat-N`` slot's key encodes NO
+                # id, so there is nothing un-plantable to confirm the re-selection.
+                #
+                # Both cases are resolved by refusing fail-closed -- the same
+                # "open a new conversation" answer the durable-carrier path above
+                # gives on a store mismatch, which leaves the member's memory
+                # intact and binds it cleanly in a new conversation:
+                #  * DM slot whose encoded id DIFFERS from the resolved member's
+                #    (the alias was reassigned): the thread belongs to a specific
+                #    member and the alias now names another.
+                #  * Restricted session on an ordinary slot (no durable id in the
+                #    key) whose alias resolves to a V2 member: there is no
+                #    un-plantable identity to prove this chat ran as that member,
+                #    and the session READS memory, so neither binding the member's
+                #    private store (a cross-member leak / crash) nor substituting
+                #    the default store (reading Global memory the chat did not run
+                #    as) is acceptable -- refuse instead of reading either.
+                # The second case is gated on ``slot.is_restricted``: a persistent
+                # session's FIRST turn also reaches here with no carrier, and it
+                # keeps its resolved member identity (it persists what it reads, so
+                # the identity is established going forward -- nothing to leak). A
+                # legacy member has no persisted id, so ``bound_member_id`` is
+                # empty, nothing private is at stake, and neither case fires.
+                bound_member_id = execution_context.member_id or ""
+                if _dm_member_binding_changed(bound_member_id, slot.key) or (
+                    slot.is_restricted and _private_store_is_unprovable(bound_member_id, slot.key)
+                ):
+                    raise _MemoryUnavailable(
+                        "memory_unavailable: this conversation's member "
+                        "binding changed; open a new conversation"
+                    )
             else:
                 execution_context = ExecutionContext(
                     None,

@@ -1866,9 +1866,11 @@ async def test_restricted_member_session_persists_transcript_but_no_owner_record
     store: with no execution carrier written for a restricted session, a store
     name would read back as a legacy owner claim and the restart would refuse
     the chat as a member record with no identity. Left out, the restart reads
-    the session as unbound and the next turn re-selects the member from
-    ``agent`` under the retained mode -- the same live-only carrier the session
-    ran under before the restart.
+    the session as unbound. On this ordinary slot key -- which carries no
+    un-plantable member id -- the next turn cannot prove the mutable ``agent``
+    alias still names the same member, so a restricted re-selection to a member
+    with a private store is refused rather than reading memory it cannot prove
+    it ran as.
     """
     from kiro_crew.dashboard.chat_persistence import restore_recent_sessions
     from kiro_crew.execution_context import _LIVE_EXECUTIONS, _live_key
@@ -1917,10 +1919,18 @@ async def test_restricted_member_session_persists_transcript_but_no_owner_record
     assert key in restarted._restricted_keys
     assert [m["content"] for m in restored.messages][:1] == ["restricted body sentinel"]
     restarted.sessions.reset = AsyncMock(return_value=True)
+    # The restored slot is an ordinary key (not ``member-<id>``), so it carries
+    # no un-plantable identity to prove it still runs as ``writer`` -- the alias
+    # could have been reassigned between the last turn and the restart. A
+    # restricted chat reads memory, so re-selecting the member's private store
+    # (or falling back to Global) would surface memory this chat cannot prove it
+    # ran as. The second turn is therefore refused with an error row; the
+    # transcript and the member's own memory stay intact for a new conversation.
     await asyncio.wait_for(chat_runner._run_chat(restarted, restored, "second sentinel"), 10)
     await asyncio.wait_for(drain_background_tasks(restarted), 10)
-    rebound = read_session_execution(key)
-    assert rebound is not None
-    assert rebound.memory_mode == mode
-    assert rebound.store.store_id == member_store
+    assert read_session_execution(key) is None
+    assert any(
+        m["role"] == "error" and "open a new conversation" in str(m.get("content", ""))
+        for m in restored.messages
+    )
     assert "memory_store" not in restarted.conversation_log.get_metadata(key)
