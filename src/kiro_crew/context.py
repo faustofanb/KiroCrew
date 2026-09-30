@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from kiro_crew import model_registry, resource_status
 from kiro_crew._sqlite_compat import sqlite3
-from kiro_crew.agent import _prompt_path, is_managed_prompt
+from kiro_crew.agent import _prompt_path, _shipped_prompt, is_managed_prompt
 from kiro_crew.agent_discovery import agent_skill_globs
 from kiro_crew.agent_sdk.drivers import acp as acp_driver
 from kiro_crew.agent_sdk.provider_identity import PROVIDER_ACP, is_claude_code
@@ -3173,6 +3173,46 @@ def _emit_context_section_timings(
         logger.debug("Context section metric emission failed", exc_info=True)
 
 
+def _read_prompt_file(pp: Path) -> str:
+    """Read the resolved agent prompt; a bad user override degrades to the shipped one.
+
+    ``_prompt_path`` returns the user's ``~/.kiro/crew/prompt.md`` ahead of the
+    shipped prompt whenever it exists, and that file is hand-authored: Windows
+    PowerShell 5.1 redirection writes it as UTF-16 with a BOM, so a strict UTF-8
+    read raises ``UnicodeDecodeError`` -- a ``ValueError``, not an ``OSError``.
+    Both provider branches of ``_resolve_agent_prompt`` read through here, and
+    so does ``_load_agent_prompt`` for a spec carrying the managed contract (the
+    same file), so one guard covers both failure families (``OSError``:
+    missing/unreadable; ``UnicodeDecodeError``: misencoded) and both degrade the
+    same way: one WARNING naming the file and the cause, then the shipped prompt,
+    so the turn still answers. When the file that failed IS the shipped prompt
+    there is nothing left to fall to, and "" is the "no contract" answer. A
+    custom agent's OWN ``file://`` prompt keeps that loader's bounded reader.
+
+    The read goes through ``safe_read_file``: the override lives at a path an
+    in-sandbox agent may write, so a symlink planted there pointing at a
+    credential file is refused (``PermissionError``, an ``OSError``) and degrades
+    like any other unreadable override instead of entering the model context.
+    """
+    try:
+        return safe_read_file(str(pp))
+    except (OSError, UnicodeDecodeError) as exc:
+        fallback = _shipped_prompt()
+        if fallback == pp:
+            logger.warning("Shipped prompt %s could not be read (%s); no agent prompt", pp, exc)
+            return ""
+        logger.warning(
+            "Ignoring prompt override %s (%s); using the shipped prompt %s", pp, exc, fallback
+        )
+        try:
+            return safe_read_file(str(fallback))
+        except (OSError, UnicodeDecodeError) as exc2:
+            logger.warning(
+                "Shipped prompt %s could not be read (%s); no agent prompt", fallback, exc2
+            )
+            return ""
+
+
 class ContextBuilder:
     """Builds context for injection into ACP prompts.
 
@@ -3567,9 +3607,12 @@ class ContextBuilder:
             # inherits _NATIVE_PROMPT_STUB verbatim, and returned literally the
             # stub text would be that agent's whole persona. An owner template's
             # own prompt is delivered via essentials, so it is omitted here.
+            # The contract file is the same one the default branch reads, so it
+            # takes the same reader: a bad user override degrades to the shipped
+            # prompt with a WARNING instead of silently erasing the contract.
             if is_managed_prompt(prompt):
-                prompt = f"file://{_prompt_path()}"
-            elif agent == owner_template:
+                return _read_prompt_file(_prompt_path())
+            if agent == owner_template:
                 return ""
             if prompt.startswith("file://"):
                 source = Path(prompt[7:]).expanduser()
@@ -4877,7 +4920,7 @@ class ContextBuilder:
             # A custom agent keeps its own prompt on every provider.
             try:
                 pp = _prompt_path()
-                agent_prompt = pp.read_text(encoding="utf-8")
+                agent_prompt = _read_prompt_file(pp)
                 agent_prompt = agent_prompt.replace("kiro-cli", "claude code")
                 agent_prompt = re.sub(r"\bKiro\b", "Claude", agent_prompt)
                 agent_prompt = re.sub(r"\bkiro\b", "claude", agent_prompt)
@@ -4889,12 +4932,9 @@ class ContextBuilder:
                 agent or "", project, owner_template=(agent or "") if private_owner else ""
             )
         else:
-            try:
-                pp = _prompt_path()
-                logger.debug("Prompt selection: mode=%r → %s", mode, pp)
-                agent_prompt = pp.read_text(encoding="utf-8")
-            except OSError:
-                agent_prompt = ""
+            pp = _prompt_path()
+            logger.debug("Prompt selection: mode=%r → %s", mode, pp)
+            agent_prompt = _read_prompt_file(pp)
         if not agent_prompt:
             return ""
         # Any host-derived token in this prompt must be snapshotted per session:
