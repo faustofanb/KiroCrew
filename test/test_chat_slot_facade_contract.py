@@ -43,7 +43,6 @@ _TO_DICT_KEYS = (
     "artifact",
     "messages",
     "running",
-    "orchestrating",
     "queue_depth",
     "stopping",
     "pending_approval",

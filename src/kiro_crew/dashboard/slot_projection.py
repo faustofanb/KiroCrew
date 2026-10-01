@@ -411,7 +411,6 @@ class SlotProjection:
             "artifact": slot._artifact,
             "messages": len(slot.messages),
             "running": slot.turn_running,
-            "orchestrating": slot._in_stage_execution,
             "queue_depth": slot.queue_depth,
             "stopping": slot._stopping,
             "pending_approval": pending_approval,
