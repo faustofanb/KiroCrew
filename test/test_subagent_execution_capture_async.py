@@ -316,7 +316,12 @@ async def test_retry_retains_original_member_app_and_mode_after_parent_closes(mo
     )
     request = SimpleNamespace(
         get=lambda key, default=None: default,
-        app={"state": SimpleNamespace(subagents=SimpleNamespace(get=lambda _id: old))},
+        app={
+            "state": SimpleNamespace(
+                # ``continuation_of``: nobody continued this run.
+                subagents=SimpleNamespace(get=lambda _id: old, continuation_of=lambda _id: "")
+            )
+        },
         match_info={"agent_id": old.id},
     )
     loop_thread = threading.get_ident()

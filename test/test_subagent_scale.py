@@ -2441,6 +2441,7 @@ class TestRetryGating:
     def _mgr_with(self, info: SubagentInfo) -> MagicMock:
         mgr = MagicMock()
         mgr.get = MagicMock(return_value=info)
+        mgr.continuation_of = MagicMock(return_value="")  # nobody continued it
         return mgr
 
     def _request(self, mgr, agent_id: str):

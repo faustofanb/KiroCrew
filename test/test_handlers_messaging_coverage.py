@@ -160,6 +160,9 @@ def _mgr(**kw: Any) -> Any:
     mgr._agents = {}
     mgr._tasks = {}
     mgr.get.return_value = None
+    # A plain run has no continuation; a MagicMock's default answer is truthy
+    # and would read as "adopted" to the retry route.
+    mgr.continuation_of.return_value = ""
     mgr.settle_before_delete = AsyncMock(return_value="delivered")
     for key, val in kw.items():
         setattr(mgr, key, val)

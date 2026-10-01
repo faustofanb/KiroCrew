@@ -3945,6 +3945,7 @@ class TestSubagentDone:
         )
         retry = SubagentInfo(id="retry", task="failed", parent_session_key=parent)
         manager.get.return_value = old
+        manager.continuation_of.return_value = ""  # nobody continued this run
         manager.spawn.return_value = retry
         request = MagicMock()
         request.app = {"state": orch.dashboard_state}

@@ -1614,7 +1614,11 @@ async def api_spawn_retry(request: web.Request) -> web.Response:
 
     Backs the chip's "Retry failed (N)" batch control. Only terminal failed
     agents are retryable (never running ones — that would double the work —
-    and never user-stopped ones — the user killed that work on purpose).
+    and never user-stopped ones — the user killed that work on purpose), and
+    never a failed run whose conversation a ``spawn_continue`` adopted
+    (``continuation_of``): that work moved to the continuation, and a fresh
+    spawn of the original prompt would double it too (typed 409,
+    ``superseded_by_continuation``).
     Spawns a fresh agent with the original task/agent/parent (new id; the old
     terminal card stays for history). Batch identity is NOT carried over: the
     retry is a standalone spawn, so a wave's digest accounting (already
@@ -1637,6 +1641,29 @@ async def api_spawn_retry(request: web.Request) -> web.Response:
     if old.outcome != "failed":
         return web.json_response(
             {"error": f"only failed agents can be retried (outcome={old.outcome})"},
+            status=409,
+        )
+    # A failed run whose conversation a ``spawn_continue`` has taken forward is
+    # history, not retryable work: the continuation holds the run's context and
+    # may already have finished the task, so a fresh spawn of the original
+    # prompt is a SECOND writer on the same work -- a turn-limited member whose
+    # continuation finished its task, re-spawned from this route into the same
+    # worktree once per click of the control that backs it. The card stays
+    # "failed" in the panel, so the button keeps offering it; the refusal is
+    # what closes the gap, and it names the run that carries the work on.
+    continued_by = state.subagents.continuation_of(agent_id)
+    if continued_by:
+        return web.json_response(
+            {
+                "error": (
+                    f"this run's conversation was continued by run {continued_by} "
+                    "(spawn_continue), which carries its work forward; retrying the "
+                    "original would start a second copy of the same task. Continue or "
+                    "retry that run instead."
+                ),
+                "code": "superseded_by_continuation",
+                "continued_by": continued_by,
+            },
             status=409,
         )
     execution = old.execution_context

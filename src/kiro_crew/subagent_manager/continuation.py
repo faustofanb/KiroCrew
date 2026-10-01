@@ -164,6 +164,56 @@ class ContinuationCoordinator(ManagerComponent):
                 return SubagentInfo(id=held, task="", _state_writer_abandoned=True)
         return None
 
+    def _note_adoption_impl(self, conv_id: str, child: SubagentInfo | None) -> None:
+        """Mark run *conv_id* as superseded by *child*, the continuation that
+        just took its conversation forward.
+
+        Called by both ``continue_conversation`` entries right after ``spawn``
+        returned, so every accepted continuation -- started or queued behind
+        the stagger -- lands the mark, and a REFUSED one (``conversation_busy``,
+        ``conversation_gone``, a store refusal: ``done`` with an ``error``)
+        leaves the original exactly as retryable as it was. The mark lives on
+        the original's own record rather than on the child because the child
+        can be dismissed from the panel or evicted while the original's failed
+        card stays; it is never cleared, since the work has moved on whatever
+        the continuation then does. An original already evicted from
+        ``_agents`` cannot carry it, and needs none: the retry route cannot
+        find such a run either.
+        """
+        if child is None or not child.id or (child.done and child.error):
+            return
+        original = self._manager._agents.get(conv_id)
+        if original is None or original.id == child.id:
+            return
+        original.superseded_by = child.id
+
+    def continuation_of_impl(self, agent_id: str) -> str:
+        """Id of the run that adopted *agent_id*'s conversation, or ``""``.
+
+        The mark ``_note_adoption`` left on the original is read first. The
+        registry scan behind it is the same evidence read from the other side
+        -- any run, live or finished, whose ``conversation_key`` names this
+        run, and any unstarted queue entry carrying that key -- so a
+        continuation that reached the registry without passing the mark (a
+        durable row re-dispatched under its original params) still counts.
+        ``_resume_id`` entries are skipped for the reason ``_conversation_busy``
+        gives: they carry no conversation key and name a resident run, not a
+        continuation.
+        """
+        original = self._manager._agents.get(agent_id)
+        if original is not None and original.superseded_by:
+            return original.superseded_by
+        conv_key = f"subagent:{agent_id}"
+        for info in self._manager._agents.values():
+            if info.id != agent_id and info.conversation_key == conv_key:
+                return info.id
+        for params in self._manager._queue:
+            if params.get("_resume_id"):
+                continue
+            if str(params.get("conversation_key") or "") == conv_key:
+                return str(params.get("_preassigned_id") or "queued")
+        return ""
+
     def _keep_recorded_on_disk_impl(self, key: str) -> bool:
         """Retention guard for subagent conversations without loop-side disk probes.
 
@@ -399,7 +449,9 @@ class ContinuationCoordinator(ManagerComponent):
         )
         if not isinstance(prelude, dict):
             return prelude
-        return self._manager.spawn(**prelude)
+        child = self._manager.spawn(**prelude)
+        self._manager._note_adoption(conv_id, child)
+        return child
 
     async def continue_conversation_async_impl(
         self,
@@ -491,7 +543,9 @@ class ContinuationCoordinator(ManagerComponent):
         )
         if not isinstance(prelude, dict):
             return prelude
-        return await self._manager.spawn_async(**prelude)
+        child = await self._manager.spawn_async(**prelude)
+        self._manager._note_adoption(conv_id, child)
+        return child
 
     def _continue_prelude_impl(
         self,

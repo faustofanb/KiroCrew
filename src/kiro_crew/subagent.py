@@ -2418,6 +2418,17 @@ class SubagentInfo:
     # finds the persisted sid and arms session/load. Empty ⇒ the default
     # ``subagent:{id}``.
     conversation_key: str = ""
+    # The run that ADOPTED this run's conversation through ``spawn_continue``
+    # (its id), or "" while no continuation exists. Set on the ORIGINAL by
+    # ``_note_adoption`` the moment a continuation on ``subagent:<this id>`` is
+    # accepted, and never cleared: once a continuation has taken the work
+    # forward, this record is history, not retryable work -- the dashboard's
+    # Retry failed control re-spawns a failed run's original prompt with no
+    # conversation key, which for a continued run is a fresh writer on the
+    # same worktree. ``continuation_of`` reads it first and falls back to
+    # the registry scan, so a continuation dismissed from the panel still
+    # counts.
+    superseded_by: str = ""
     # Optional subprocess cwd override. When set, the subagent kiro-cli/claude-code
     # process launches here instead of the default ``subagent_<id>`` sandbox, so
     # cwd-relative resource globs (``.kiro/steering/**/*.md``, ``AGENTS.md``,
@@ -5122,6 +5133,18 @@ class SubagentManager:
 
     def _scan_keep_states(self) -> list[tuple[str, str, str, str, str, float]]:
         return self._continuation._scan_keep_states_impl()
+
+    def continuation_of(self, agent_id: str) -> str:
+        """Id of the run that adopted *agent_id*'s conversation, or ``""``.
+
+        The read side of the adoption mark: a retry of a run whose work a
+        continuation has taken forward is a second writer on the same work,
+        so the dashboard's retry route refuses when this answers non-empty.
+        """
+        return self._continuation.continuation_of_impl(agent_id)
+
+    def _note_adoption(self, conv_id: str, child: SubagentInfo | None) -> None:
+        return self._continuation._note_adoption_impl(conv_id, child)
 
     async def _rebuild_conversation_registry(self) -> None:
         return await self._continuation._rebuild_conversation_registry_impl()

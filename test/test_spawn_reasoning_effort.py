@@ -479,6 +479,7 @@ class TestRecordAndRetry:
         )
         mgr = MagicMock()
         mgr.get.return_value = old
+        mgr.continuation_of.return_value = ""  # nobody continued this run
         mgr.spawn.return_value = SimpleNamespace(id="a2", done=False, error="")
         state = SimpleNamespace(subagents=mgr)
         request = MagicMock()
