@@ -375,7 +375,12 @@ from kiro_crew.security.exfil import MAX_BLOCKED_LINKS_PER_MESSAGE
 from kiro_crew.security.readonly_bash import is_read_only_bash, unsafe_bash_reason
 from kiro_crew.security.redaction import redact_credentials_with_records
 from kiro_crew.sel import SecurityEvent, sel, sel_is_warm
-from kiro_crew.session import SessionBusyError, SessionClosingError, SpeculativeResumeRefused
+from kiro_crew.session import (
+    SessionBusyError,
+    SessionClosingError,
+    SessionEndingError,
+    SpeculativeResumeRefused,
+)
 from kiro_crew.session_agent_selection import (
     record_agent_selection,
     record_provider_agent_switch,
@@ -383,6 +388,7 @@ from kiro_crew.session_agent_selection import (
     restore_agent_selection,
     session_agent_selection_kind,
 )
+from kiro_crew.session_capabilities import CapabilityStartupError
 from kiro_crew.slack.handler import post_linked_approval, resolve_linked_approval
 from kiro_crew.slack.outbound import PostedOptions
 from kiro_crew.trust_patterns import (  # noqa: F401 -- compatibility re-export
@@ -6655,12 +6661,25 @@ _eager_spawn_sem = asyncio.Semaphore(_EAGER_SPAWN_MAX_CONCURRENT)
 # spawns and tears down a whole process tree, and the signals that schedule an
 # eager spawn (focus, reconnect, slot create, reset) fire again and again, so an
 # unbounded retry turns one broken start into a steady churn of processes. After
-# each failure the next background start waits for an exponential backoff; after
-# the cap the slot stops starting in the background and says so once. The user's
-# own next message still starts it, and a start that succeeds clears the count.
+# each failure, every signal inside a backoff window is skipped: nothing is
+# queued for later, and the first signal after the window starts normally. With
+# a cap of 3 the reachable windows are 10s after the first failure and 20s after
+# the second (the doubling and its 300s ceiling bound a larger cap). After the cap the slot stops starting in the background and says so once (one ERROR
+# log line and one error row in the chat). From then on background starts stay
+# OFF for that slot until a start succeeds -- the user's own next message still
+# starts it, and that success clears the count -- or the gateway restarts: the
+# count lives only on the in-memory slot, so a restart starts it again at zero.
+#
+# Only a failure of the agent START counts: an exception out of the session
+# allocation in ``_spawn_admitted_prefetch``. A failed pending-reset consume, a
+# binding/selection write, the admission bookkeeping around it, or a capability
+# refusal raised before any process ran (``_is_pre_spawn_refusal``) spawned no
+# agent process, so it is logged and does not move the slot toward the cap.
 _EAGER_SPAWN_FAILURE_CAP = 3
 _EAGER_SPAWN_BACKOFF_BASE_SECS = 10.0
 _EAGER_SPAWN_BACKOFF_MAX_SECS = 300.0
+#: Bound on the last-error text the stop notice carries into the chat.
+_EAGER_SPAWN_ERROR_DETAIL_MAX_CHARS = 500
 
 
 def _eager_spawn_backoff_secs(failures: int) -> float:
@@ -6686,6 +6705,12 @@ def _note_eager_spawn_failure(slot: "_ChatSlot", exc: BaseException) -> None:
     failures = getattr(slot, "_eager_spawn_failures", 0) + 1
     slot._eager_spawn_failures = failures
     slot._eager_spawn_retry_at = time.monotonic() + _eager_spawn_backoff_secs(failures)
+    if failures > _EAGER_SPAWN_FAILURE_CAP:
+        # Already stopped and already said so. ``schedule_eager_spawn`` refuses a
+        # slot at the cap, so this is only a spawn that was in flight when the
+        # cap was reached; the stop is announced once, not per late failure.
+        logger.debug("Eager spawn: slot %s failed again after the stop", slot.key)
+        return
     if failures < _EAGER_SPAWN_FAILURE_CAP:
         logger.warning(
             "Eager spawn: slot %s failed to start (%d/%d); next background start " "in %.0fs",
@@ -6697,12 +6722,13 @@ def _note_eager_spawn_failure(slot: "_ChatSlot", exc: BaseException) -> None:
         return
     logger.error(
         "Eager spawn: slot %s failed to start %d times in a row; background starts "
-        "stopped until a start succeeds",
+        "stay off until a start succeeds or the gateway restarts",
         slot.key,
         failures,
     )
-    detail, _ = redact_exfiltration_urls(str(exc))
-    detail, _ = redact_credentials(detail)
+    # Redacted over the whole text, then bounded: an agent error can carry a
+    # near-frame-limit payload, and this row is retained and broadcast.
+    detail = redact_and_truncate(str(exc), _EAGER_SPAWN_ERROR_DETAIL_MAX_CHARS)
     try:
         slot.append(
             "error",
@@ -6713,6 +6739,38 @@ def _note_eager_spawn_failure(slot: "_ChatSlot", exc: BaseException) -> None:
         )
     except Exception:
         logger.debug("Eager spawn: could not post the stop notice for %s", slot.key, exc_info=True)
+
+
+#: ``CapabilityStartupError`` codes raised only before any agent process exists:
+#: the member, its enrollment state or its prepared generation cannot be read, or
+#: the provider cannot host it. ``capability_runtime_unverified`` is raised only
+#: after a process ran. ``capability_runtime_cwd_changed`` and
+#: ``capability_startup_raced`` come from ``verify_saved``, which runs both before
+#: the start and after it, so the code alone cannot say whether a process ran;
+#: they are left counted, the side that keeps a churning start bounded.
+_PRE_SPAWN_CAPABILITY_CODES = frozenset(
+    {
+        "capability_member_missing",
+        "capability_state_unreadable",
+        "capability_generation_missing",
+        "capability_harness_unsupported",
+        "capability_runtime_not_fresh",
+    }
+)
+
+
+def _is_pre_spawn_refusal(exc: BaseException) -> bool:
+    """Whether *exc* refused a background start before any agent process ran.
+
+    A ``CapabilityError`` is a refusal of the member's capability spec, which
+    the user fixes in Capabilities rather than by retrying; counting it would
+    end in a notice that blames a failed start. Pre-spawn capability startup
+    codes are the same kind of refusal. Neither spawns a process, so neither
+    feeds the churn the background-start cap bounds.
+    """
+    if isinstance(exc, CapabilityError):
+        return True
+    return isinstance(exc, CapabilityStartupError) and str(exc) in _PRE_SPAWN_CAPABILITY_CODES
 
 
 def _clear_eager_spawn_failures(slot: "_ChatSlot") -> None:
@@ -7384,9 +7442,13 @@ async def _eager_spawn(
         # closing while the speculative spawn was mid-start. Not a failure —
         # the allocation path already reaped the half-started provider.
         logger.info("Eager spawn for %s aborted — gateway is shutting down", slot.key)
-    except Exception as exc:
+    except Exception:
+        # Logged, not counted: the agent-start failures that count toward the
+        # background-start cap were already noted at the allocation itself
+        # (``_spawn_admitted_prefetch``); everything else reaching here -- a
+        # pending-reset consume, a selection write, admission bookkeeping --
+        # spawned no agent and must not stop background starts.
         logger.warning("Eager spawn failed for slot %s", slot.key, exc_info=True)
-        _note_eager_spawn_failure(slot, exc)
 
 
 async def _spawn_admitted_prefetch(
@@ -7437,21 +7499,35 @@ async def _spawn_admitted_prefetch(
         # resumed=True observation is armed for the real turn. See
         # get_or_create's docstring.
         _requested_model = slot.model or agent_model or default_model or ""
-        _, is_new, resumed = await sessions.get_or_create(
-            session_key,
-            agent=kiro_agent or slot.agent or None,
-            # Canonical crew identity — the resolver's alias, which
-            # covers the default crew on an empty slot; plumbed to the
-            # session so per-agent watchdog windows never depend on a
-            # cross-namespace name match. "" is authoritative: no
-            # alias applied, so no override applies.
-            crew_agent=crew_alias,
-            model=_requested_model or None,
-            cwd=slot.project or None,
-            speculative=True,
-            speculative_resume=allow_resume,
-            reasoning_effort_override=slot.reasoning_effort or None,
-        )
+        try:
+            _, is_new, resumed = await sessions.get_or_create(
+                session_key,
+                agent=kiro_agent or slot.agent or None,
+                # Canonical crew identity — the resolver's alias, which
+                # covers the default crew on an empty slot; plumbed to the
+                # session so per-agent watchdog windows never depend on a
+                # cross-namespace name match. "" is authoritative: no
+                # alias applied, so no override applies.
+                crew_agent=crew_alias,
+                model=_requested_model or None,
+                cwd=slot.project or None,
+                speculative=True,
+                speculative_resume=allow_resume,
+                reasoning_effort_override=slot.reasoning_effort or None,
+            )
+        except (SpeculativeResumeRefused, SessionClosingError, SessionEndingError):
+            # A refusal, a gateway shutdown, or a key being ended: no agent
+            # start was attempted and failed, so none of them is counted.
+            raise
+        except Exception as exc:
+            # The one place a background start can fail to START the agent
+            # (a failed spawn or initialize handshake). Counted here, not in
+            # ``_eager_spawn``'s catch-all, so a reset or binding error raised
+            # around this call never moves the slot toward the cap. A
+            # capability refusal raised before any process ran is not one.
+            if not _is_pre_spawn_refusal(exc):
+                _note_eager_spawn_failure(slot, exc)
+            raise
     except SpeculativeResumeRefused:
         # Two sources: the entry gate (resumable key, resume not
         # opted in — fresh eager spawn leaves it to the first turn)

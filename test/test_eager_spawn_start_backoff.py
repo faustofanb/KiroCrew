@@ -10,6 +10,7 @@ one error row, and resumes once a start succeeds.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -115,3 +116,210 @@ def test_the_backoff_is_capped():
     big = chat_runner._eager_spawn_backoff_secs(50)
     assert big == chat_runner._EAGER_SPAWN_BACKOFF_MAX_SECS
     assert chat_runner._eager_spawn_backoff_secs(0) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_a_reset_failure_does_not_count_toward_the_cap():
+    """A failed pending-reset consume spawned no agent, so it moves no count."""
+    slot = _ChatSlot("t1")
+    state = _state(slot, fail=False)
+    with patch.object(
+        chat_runner, "_consume_pending_reset", AsyncMock(side_effect=RuntimeError("reset failed"))
+    ):
+        for _ in range(chat_runner._EAGER_SPAWN_FAILURE_CAP + 1):
+            await _eager_spawn(state, slot)
+    assert slot._eager_spawn_failures == 0
+    assert slot._eager_spawn_retry_at == 0.0
+    assert _error_rows(slot) == []
+    assert state.sessions.get_or_create.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_binding_write_failure_does_not_count_toward_the_cap():
+    """The agent-selection write runs before any spawn; its failure is not a start's."""
+    slot = _ChatSlot("t1")
+    state = _state(slot, fail=False)
+    with patch.object(
+        chat_runner, "record_agent_selection", MagicMock(side_effect=OSError("disk full"))
+    ):
+        for _ in range(chat_runner._EAGER_SPAWN_FAILURE_CAP + 1):
+            await _eager_spawn(state, slot)
+    assert slot._eager_spawn_failures == 0
+    assert _error_rows(slot) == []
+    assert state.sessions.get_or_create.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_or_ending_refusal_is_not_a_failed_start():
+    """A closing gateway or a key being ended refused the start; nothing failed to start."""
+    from kiro_crew.session import SessionClosingError, SessionEndingError
+
+    for refusal in (SessionClosingError("closing"), SessionEndingError("ending")):
+        slot = _ChatSlot("t1")
+        state = _state(slot, fail=False)
+        state.sessions.get_or_create = AsyncMock(side_effect=refusal)
+        for _ in range(chat_runner._EAGER_SPAWN_FAILURE_CAP + 1):
+            await _eager_spawn(state, slot)
+        assert slot._eager_spawn_failures == 0, refusal
+        assert _error_rows(slot) == [], refusal
+
+
+@pytest.mark.asyncio
+async def test_the_stop_is_logged_and_announced_once(caplog):
+    """A spawn in flight when the cap was reached fails again without a second notice."""
+    slot = _ChatSlot("t1")
+    state = _state(slot, fail=True)
+    with caplog.at_level("ERROR", logger=chat_runner.logger.name):
+        for _ in range(chat_runner._EAGER_SPAWN_FAILURE_CAP + 2):
+            # Direct calls bypass the scheduler's refusal, standing in for a
+            # spawn that was already running when the cap was reached.
+            await _eager_spawn(state, slot)
+    stops = [r for r in caplog.records if "stay off until a start succeeds" in r.getMessage()]
+    assert len(stops) == 1, [r.getMessage() for r in caplog.records]
+    assert "gateway restarts" in stops[0].getMessage()
+    assert len(_error_rows(slot)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_pre_spawn_capability_refusal_is_not_a_failed_start():
+    """A member's capability refusal ran no process; it must not stop background starts."""
+    from kiro_crew.agent_capabilities import CapabilityError
+    from kiro_crew.session_capabilities import CapabilityStartupError
+
+    refusals = [CapabilityError("invalid_spec")] + [
+        CapabilityStartupError(code) for code in sorted(chat_runner._PRE_SPAWN_CAPABILITY_CODES)
+    ]
+    for refusal in refusals:
+        slot = _ChatSlot("t1")
+        state = _state(slot, fail=False)
+        state.sessions.get_or_create = AsyncMock(side_effect=refusal)
+        for _ in range(chat_runner._EAGER_SPAWN_FAILURE_CAP + 1):
+            await _eager_spawn(state, slot)
+        assert slot._eager_spawn_failures == 0, refusal
+        assert _error_rows(slot) == [], refusal
+
+
+@pytest.mark.asyncio
+async def test_a_capability_failure_after_the_process_ran_still_counts():
+    """A code a process-ran site can raise counts: it may have spawned a tree.
+
+    ``capability_runtime_unverified`` is raised only after the start; the cwd and
+    race codes come from a check that runs both before and after it, so they are
+    counted too rather than risk leaving a churning start unbounded.
+    """
+    from kiro_crew.session_capabilities import CapabilityStartupError
+
+    for code in (
+        "capability_runtime_unverified",
+        "capability_runtime_cwd_changed",
+        "capability_startup_raced",
+    ):
+        slot = _ChatSlot("t1")
+        state = _state(slot, fail=False)
+        state.sessions.get_or_create = AsyncMock(side_effect=CapabilityStartupError(code))
+        await _eager_spawn(state, slot)
+        assert slot._eager_spawn_failures == 1, code
+
+
+@pytest.mark.asyncio
+async def test_the_stop_notice_bounds_the_error_it_carries():
+    """A near-frame-limit agent error must not become a multi-megabyte chat row."""
+    slot = _ChatSlot("t1")
+    state = _state(slot, fail=False)
+    huge = "initialize failed: " + "x" * 2_000_000
+    state.sessions.get_or_create = AsyncMock(side_effect=RuntimeError(huge))
+    for _ in range(chat_runner._EAGER_SPAWN_FAILURE_CAP):
+        await _eager_spawn(state, slot)
+    rows = _error_rows(slot)
+    assert len(rows) == 1, rows
+    assert "initialize failed: x" in rows[0]
+    # A fixed ceiling, not one read from the code under test.
+    assert len(rows[0]) < 2_000, len(rows[0])
+
+
+def test_the_spec_states_the_numbers_the_code_uses():
+    """docs/system-specs/modules/config.md names 10s, 300s, 3 and 500; they must be true.
+
+    Literals on both sides: a constant read from the module would agree with
+    itself however far it drifted from the spec.
+    """
+    assert chat_runner._EAGER_SPAWN_BACKOFF_BASE_SECS == 10.0
+    assert chat_runner._EAGER_SPAWN_BACKOFF_MAX_SECS == 300.0
+    assert chat_runner._EAGER_SPAWN_FAILURE_CAP == 3
+    assert chat_runner._EAGER_SPAWN_ERROR_DETAIL_MAX_CHARS == 500
+    # The schedule itself, not only its inputs: 10s, doubling, capped at 300s.
+    waits = [chat_runner._eager_spawn_backoff_secs(n) for n in range(1, 8)]
+    assert waits == [10.0, 20.0, 40.0, 80.0, 160.0, 300.0, 300.0]
+
+    spec = Path(__file__).resolve().parents[1] / "docs/system-specs/modules/config.md"
+    text = spec.read_text(encoding="utf-8")
+    head = "**Failed background starts back off, then stop.**"
+    assert head in text, "the eager-spawn backoff paragraph is gone from the spec"
+    paragraph = " ".join(text[text.index(head) :].split("\n\n", 1)[0].split())
+    for claim in (
+        "10s after the first failure, 20s after the second",
+        "doubles up to a 300s ceiling",
+        "After 3 failures in a row",
+        "bounded to 500 characters",
+        "off until a start succeeds or the gateway restarts",
+    ):
+        assert claim in paragraph, claim
+
+
+def _user_turn(tmp_path, monkeypatch):
+    """Drive one real ``_run_chat`` turn on a slot already stopped at the cap."""
+    import asyncio
+
+    from chat_test_helpers import _make_state
+
+    from kiro_crew.providers.base import EVENT_COMPLETE, LLMEvent
+
+    state = _make_state(tmp_path)
+    client = MagicMock()
+    client.context_usage_pct = MagicMock(return_value=50.0)
+    client.shutdown = AsyncMock()
+
+    async def _stream(msg):
+        yield LLMEvent(kind=EVENT_COMPLETE)
+
+    client.stream = _stream
+    client.stream_command = _stream
+    state.sessions.get_or_create = AsyncMock(return_value=(client, False, False))
+    state.sessions.release = MagicMock()
+    state.sessions.reset = AsyncMock()
+    state.sessions.set_approval_policy = MagicMock()
+    state.sessions.check_context_usage = MagicMock()
+    state.sessions.record_success = MagicMock()
+    state.sessions.record_failure = AsyncMock()
+    state.sessions.get_slack_link = MagicMock(return_value=(None, None))
+    state.broadcast_ws = MagicMock()
+    state.push_slots_update = MagicMock()
+    state.is_yolo_active = MagicMock(return_value=False)
+    state._background_tasks = set()
+    slot = state.get_or_create_slot("eager-backoff-user-turn")
+    slot._eager_spawn_failures = chat_runner._EAGER_SPAWN_FAILURE_CAP
+    slot._eager_spawn_retry_at = time.monotonic() + 300.0
+    assert chat_runner._eager_spawn_held_off(slot)
+
+    async def run():
+        try:
+            await chat_runner._run_chat(state, slot, "hello")
+        finally:
+            tasks = list(state._background_tasks)
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(run())
+    return slot
+
+
+def test_a_users_successful_turn_re_enables_background_starts(tmp_path, monkeypatch):
+    """The stop notice promises "Send a message to try again"; a turn that gets
+    its session must clear the cap so background starts resume."""
+
+    slot = _user_turn(tmp_path, monkeypatch)
+    assert slot._eager_spawn_failures == 0
+    assert slot._eager_spawn_retry_at == 0.0
+    assert not chat_runner._eager_spawn_held_off(slot)
