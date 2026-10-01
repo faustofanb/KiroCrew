@@ -191,24 +191,19 @@ class TestTurnStatsTtft:
         _attach_turn_stats(slot, 9000, 1.0, 0.0)
         assert "ttft_ms" not in slot.messages[-1]["meta"]["turn_stats"]
 
-    def test_emit_returns_the_recorded_latency(self, monkeypatch):
-        recorded = []
+    def test_clock_stops_at_first_non_empty_broadcast(self, monkeypatch):
+        # A redactor that withholds the first chunk feeds "" first; the clock
+        # must keep running until real output reaches the wire.
+        now = iter([10.0, 12.5, 30.0])
+        monkeypatch.setattr(chat_runner.time, "monotonic", lambda: next(now))
+        clock = chat_runner._FirstVisibleClock(chat_runner.time.monotonic())
+        clock.mark("")
+        assert clock.ms == 0
+        clock.mark("Hel")
+        clock.mark("lo")
+        assert clock.ms == 2500
 
-        class _Rec:
-            def histogram(self, name, value, **kwargs):
-                recorded.append(value)
-
-        monkeypatch.setattr("kiro_crew.metrics.provider.get_recorder", lambda: _Rec())
-        monkeypatch.setattr(chat_runner.time, "monotonic", lambda: 12.5)
-        ms = chat_runner._emit_ttft_metric(10.0, "dashboard:chat-1-x", is_new=False, resumed=False)
-        assert ms == 2500
-        assert recorded == [2500.0]
-
-    def test_emit_returns_latency_even_when_recorder_fails(self, monkeypatch):
-        def _boom():
-            raise RuntimeError("boom")
-
-        monkeypatch.setattr("kiro_crew.metrics.provider.get_recorder", _boom)
-        monkeypatch.setattr(chat_runner.time, "monotonic", lambda: 11.0)
-        ms = chat_runner._emit_ttft_metric(10.0, "dashboard:chat-1-x", is_new=False, resumed=False)
-        assert ms == 1000
+    def test_clock_without_start_never_measures(self):
+        clock = chat_runner._FirstVisibleClock(None)
+        clock.mark("text")
+        assert clock.ms == 0

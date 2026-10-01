@@ -3163,10 +3163,9 @@ def _attach_turn_stats(
     bare ``"auto"`` when the turn was handed to Auto and the backend disclosed
     no id for it — Auto's per-turn choice is not on the ACP wire, so ``"auto"``
     is the whole of what can be said truthfully. ``ttft_ms`` is the user
-    message to first visible model output latency, the same value
-    ``_emit_ttft_metric`` records, so it is measurable without telemetry on.
-    Zero/empty fields are omitted so the frontend renders only what the
-    provider actually reported.
+    message to first broadcast output latency (``_FirstVisibleClock``), stored
+    so it is readable without telemetry on. Zero/empty fields are omitted so
+    the frontend renders only what the provider actually reported.
 
     ``turn_boundary`` is ``len(slot.messages)`` captured at turn start: only
     messages appended DURING this turn are candidates. Without it, an
@@ -9956,11 +9955,27 @@ async def _finish_queue_cycle(
     summary_task.add_done_callback(state._background_tasks.discard)
 
 
-def _emit_ttft_metric(t0: float, session_key: str, *, is_new: bool, resumed: bool) -> int:
-    """Emit the user-message → first-visible-token latency histogram.
+class _FirstVisibleClock:
+    """User message -> first output that actually reaches the wire, in ms.
 
-    Returns the measured latency in whole milliseconds, so the caller can also
-    store it in the turn's ``turn_stats`` whether or not telemetry is on.
+    Stops on the first NON-EMPTY broadcast, not on chunk receipt: the stream
+    redactors can withhold a whole first chunk until a later chunk or a flush,
+    so the receipt time would understate what the user waited. ``t0`` None
+    (a synthetic or nested prompt) never measures, leaving ``ms`` at 0.
+    """
+
+    def __init__(self, t0: float | None) -> None:
+        self._t0 = t0
+        self.ms = 0
+
+    def mark(self, wire: str) -> None:
+        if wire and self._t0 is not None:
+            self.ms = int((time.monotonic() - self._t0) * 1000.0)
+            self._t0 = None
+
+
+def _emit_ttft_metric(t0: float, session_key: str, *, is_new: bool, resumed: bool) -> None:
+    """Emit the user-message → first-visible-token latency histogram.
 
     Best-effort, one point per top-level user prompt. ``first_turn`` splits the
     cold-path population eager spawn targets (the slot's first message) from
@@ -9968,7 +9983,6 @@ def _emit_ttft_metric(t0: float, session_key: str, *, is_new: bool, resumed: boo
     same attribution axes as the startup metric, so the two histograms can be
     read side by side.
     """
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
     try:
         # Re-read at call time even though the module also imports it at the
         # top: the rebind is what lets a test patching
@@ -9977,7 +9991,7 @@ def _emit_ttft_metric(t0: float, session_key: str, *, is_new: bool, resumed: boo
 
         get_recorder().histogram(
             "kirocrew.chat.first_token.duration",
-            elapsed_ms,
+            (time.monotonic() - t0) * 1000.0,
             unit="ms",
             attrs={
                 "channel": telemetry_channel_of(session_key),
@@ -9987,7 +10001,6 @@ def _emit_ttft_metric(t0: float, session_key: str, *, is_new: bool, resumed: boo
         )
     except Exception:
         logger.debug("TTFT metric emission failed", exc_info=True)
-    return int(elapsed_ms)
 
 
 class _MemoryUnavailable(RuntimeError):
@@ -10534,7 +10547,8 @@ async def _run_chat(
     # synthetic payloads and nested prompts are runner-authored, and mixing
     # them in would skew the distribution the feature is judged by.
     _ttft_t0 = time.monotonic() if (_prompt_depth == 0 and not _synthetic_payload) else None
-    _turn_ttft_ms = 0
+    # Persisted twin of the clock above, stopped at the first broadcast.
+    _ttft_visible = _FirstVisibleClock(_ttft_t0)
 
     # Inherit Slack link: if this dashboard session mirrors a Slack thread,
     # copy the link so every exit path, including an auth failure, can reply on
@@ -10779,6 +10793,7 @@ async def _run_chat(
         wire = _wsred.flush()
         if not wire:
             return
+        _ttft_visible.mark(wire)
         chunk_seq += 1
         slot._chunk_seq = chunk_seq
         # The window row carries the same seq (and process generation) as the
@@ -10802,6 +10817,7 @@ async def _run_chat(
         ends (any non-thinking event) or the turn completes. No-op when empty."""
         wire = _thinkred.flush()
         if wire:
+            _ttft_visible.mark(wire)
             state.broadcast_ws("chat_thinking", {"slot": slot.key, "content": wire})
 
     def _steer_segment_cut() -> None:
@@ -13959,9 +13975,7 @@ async def _run_chat(
 
             # First visible model output for this user prompt — emit TTFT once.
             if _ttft_t0 is not None and event.kind in (EVENT_TEXT_CHUNK, EVENT_THINKING_CHUNK):
-                _turn_ttft_ms = _emit_ttft_metric(
-                    _ttft_t0, session_key, is_new=is_new, resumed=resumed
-                )
+                _emit_ttft_metric(_ttft_t0, session_key, is_new=is_new, resumed=resumed)
                 _ttft_t0 = None
 
             # Security: tool_call_id originates from LLM — redact before any use
@@ -14097,6 +14111,7 @@ async def _run_chat(
                 # accumulates the full text for the authoritative final redaction.
                 wire = _wsred.feed(event.text)
                 if wire:
+                    _ttft_visible.mark(wire)
                     chunk_seq += 1
                     slot._chunk_seq = chunk_seq
                     # Same seq and generation on the window row as on the wire
@@ -14124,6 +14139,7 @@ async def _run_chat(
                 # thinking phase ends or the turn completes.
                 wire = _thinkred.feed(event.text)
                 if wire:
+                    _ttft_visible.mark(wire)
                     state.broadcast_ws(
                         "chat_thinking",
                         {"slot": slot.key, "content": wire},
@@ -18918,7 +18934,7 @@ async def _run_chat(
                 _turn_cost_usd,
                 turn_boundary=_turn_msg_boundary,
                 model=_turn_model,
-                ttft_ms=_turn_ttft_ms,
+                ttft_ms=_ttft_visible.ms,
             )
             # Attach accumulated file changes to this turn's assistant row before persist
             _flush_file_changes(
