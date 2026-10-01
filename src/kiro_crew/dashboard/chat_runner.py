@@ -3148,6 +3148,7 @@ def _attach_turn_stats(
     cost_usd: float,
     turn_boundary: int = 0,
     model: str = "",
+    ttft_ms: int = 0,
 ) -> None:
     """Attach per-turn stats to the last assistant message's meta.
 
@@ -3161,8 +3162,11 @@ def _attach_turn_stats(
     this turn (``read_turn_model``): a concrete id on a pinned session, or the
     bare ``"auto"`` when the turn was handed to Auto and the backend disclosed
     no id for it — Auto's per-turn choice is not on the ACP wire, so ``"auto"``
-    is the whole of what can be said truthfully. Zero/empty fields are omitted
-    so the frontend renders only what the provider actually reported.
+    is the whole of what can be said truthfully. ``ttft_ms`` is the user
+    message to first visible model output latency, the same value
+    ``_emit_ttft_metric`` records, so it is measurable without telemetry on.
+    Zero/empty fields are omitted so the frontend renders only what the
+    provider actually reported.
 
     ``turn_boundary`` is ``len(slot.messages)`` captured at turn start: only
     messages appended DURING this turn are candidates. Without it, an
@@ -3180,6 +3184,8 @@ def _attach_turn_stats(
         stats["cost_usd"] = round(cost_usd, 6)
     if model:
         stats["model"] = model
+    if ttft_ms > 0:
+        stats["ttft_ms"] = int(ttft_ms)
     boundary = max(0, turn_boundary)
     for m in reversed(slot.messages[boundary:]):
         if m.get("role") == "assistant":
@@ -9950,8 +9956,11 @@ async def _finish_queue_cycle(
     summary_task.add_done_callback(state._background_tasks.discard)
 
 
-def _emit_ttft_metric(t0: float, session_key: str, *, is_new: bool, resumed: bool) -> None:
+def _emit_ttft_metric(t0: float, session_key: str, *, is_new: bool, resumed: bool) -> int:
     """Emit the user-message → first-visible-token latency histogram.
+
+    Returns the measured latency in whole milliseconds, so the caller can also
+    store it in the turn's ``turn_stats`` whether or not telemetry is on.
 
     Best-effort, one point per top-level user prompt. ``first_turn`` splits the
     cold-path population eager spawn targets (the slot's first message) from
@@ -9959,6 +9968,7 @@ def _emit_ttft_metric(t0: float, session_key: str, *, is_new: bool, resumed: boo
     same attribution axes as the startup metric, so the two histograms can be
     read side by side.
     """
+    elapsed_ms = (time.monotonic() - t0) * 1000.0
     try:
         # Re-read at call time even though the module also imports it at the
         # top: the rebind is what lets a test patching
@@ -9967,7 +9977,7 @@ def _emit_ttft_metric(t0: float, session_key: str, *, is_new: bool, resumed: boo
 
         get_recorder().histogram(
             "kirocrew.chat.first_token.duration",
-            (time.monotonic() - t0) * 1000.0,
+            elapsed_ms,
             unit="ms",
             attrs={
                 "channel": telemetry_channel_of(session_key),
@@ -9977,6 +9987,7 @@ def _emit_ttft_metric(t0: float, session_key: str, *, is_new: bool, resumed: boo
         )
     except Exception:
         logger.debug("TTFT metric emission failed", exc_info=True)
+    return int(elapsed_ms)
 
 
 class _MemoryUnavailable(RuntimeError):
@@ -10523,6 +10534,7 @@ async def _run_chat(
     # synthetic payloads and nested prompts are runner-authored, and mixing
     # them in would skew the distribution the feature is judged by.
     _ttft_t0 = time.monotonic() if (_prompt_depth == 0 and not _synthetic_payload) else None
+    _turn_ttft_ms = 0
 
     # Inherit Slack link: if this dashboard session mirrors a Slack thread,
     # copy the link so every exit path, including an auth failure, can reply on
@@ -13947,7 +13959,9 @@ async def _run_chat(
 
             # First visible model output for this user prompt — emit TTFT once.
             if _ttft_t0 is not None and event.kind in (EVENT_TEXT_CHUNK, EVENT_THINKING_CHUNK):
-                _emit_ttft_metric(_ttft_t0, session_key, is_new=is_new, resumed=resumed)
+                _turn_ttft_ms = _emit_ttft_metric(
+                    _ttft_t0, session_key, is_new=is_new, resumed=resumed
+                )
                 _ttft_t0 = None
 
             # Security: tool_call_id originates from LLM — redact before any use
@@ -18904,6 +18918,7 @@ async def _run_chat(
                 _turn_cost_usd,
                 turn_boundary=_turn_msg_boundary,
                 model=_turn_model,
+                ttft_ms=_turn_ttft_ms,
             )
             # Attach accumulated file changes to this turn's assistant row before persist
             _flush_file_changes(

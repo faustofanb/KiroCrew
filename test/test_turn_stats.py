@@ -171,3 +171,44 @@ class TestAttachTurnStats:
         meta = slot.messages[-1]["meta"]
         assert meta["file_changes"] == [{"path": "/tmp/x"}]
         assert meta["turn_stats"]["elapsed_ms"] == 2000
+
+
+class TestTurnStatsTtft:
+    """``ttft_ms`` lands in ``turn_stats`` so latency is readable with telemetry off."""
+
+    def test_ttft_ms_attached_when_measured(self):
+        slot = _make_slot_with_assistant_message()
+        _attach_turn_stats(slot, 9000, 1.0, 0.0, ttft_ms=2345)
+        assert slot.messages[-1]["meta"]["turn_stats"] == {
+            "elapsed_ms": 9000,
+            "credits": 1.0,
+            "ttft_ms": 2345,
+        }
+
+    def test_ttft_ms_omitted_when_unmeasured(self):
+        # A synthetic or nested prompt never starts the clock, so it reports 0.
+        slot = _make_slot_with_assistant_message()
+        _attach_turn_stats(slot, 9000, 1.0, 0.0)
+        assert "ttft_ms" not in slot.messages[-1]["meta"]["turn_stats"]
+
+    def test_emit_returns_the_recorded_latency(self, monkeypatch):
+        recorded = []
+
+        class _Rec:
+            def histogram(self, name, value, **kwargs):
+                recorded.append(value)
+
+        monkeypatch.setattr("kiro_crew.metrics.provider.get_recorder", lambda: _Rec())
+        monkeypatch.setattr(chat_runner.time, "monotonic", lambda: 12.5)
+        ms = chat_runner._emit_ttft_metric(10.0, "dashboard:chat-1-x", is_new=False, resumed=False)
+        assert ms == 2500
+        assert recorded == [2500.0]
+
+    def test_emit_returns_latency_even_when_recorder_fails(self, monkeypatch):
+        def _boom():
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr("kiro_crew.metrics.provider.get_recorder", _boom)
+        monkeypatch.setattr(chat_runner.time, "monotonic", lambda: 11.0)
+        ms = chat_runner._emit_ttft_metric(10.0, "dashboard:chat-1-x", is_new=False, resumed=False)
+        assert ms == 1000
