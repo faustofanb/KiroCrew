@@ -12,6 +12,8 @@
  *  3. the not-ready tailnet state routes to the real setup card instead of
  *     minting.
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -286,5 +288,50 @@ describe('MobileConnectModal — every built-in kind actually draws', () => {
     // Each built-in section's mint affordance is its proof of presence.
     const affordance = kind === 'tailnet_qr' ? 'Show QR code' : 'Create sign-in link'
     expect(await screen.findByText(affordance)).toBeInTheDocument()
+  })
+})
+
+describe('MobileConnectModal — paints above the sessions flyout', () => {
+  // The dialog opens from the sidebar while the chat page's sessions flyout can
+  // be expanded. That flyout and its drawer morph sit above the chat pane
+  // (`SessionFlyout.tsx`, z-[59]/z-[60]) and the focus-peek rail toggle above
+  // them (z-[61]), so an overlay on the chat-pane ceiling (z-50) painted
+  // UNDER them: the left part of the dialog and its backdrop were hidden behind
+  // the open sessions panel. jsdom does no painting, so this compares the
+  // layers the sources declare, which is the property paint order follows.
+  const readSource = (...parts: string[]) =>
+    readFileSync(join(__dirname, '..', ...parts), 'utf8')
+  const zLayers = (src: string) =>
+    [...src.matchAll(/\bz-(?:\[(\d+)\]|(\d+))(?![\w-])/g)].map(m => Number(m[1] ?? m[2]))
+  const overlayZ = () => {
+    const overlay = screen.getByRole('dialog').parentElement as HTMLElement
+    const layers = zLayers(overlay.className)
+    expect(layers).toHaveLength(1)
+    return layers[0]
+  }
+
+  it('the overlay sits above every layer the sessions flyout uses', () => {
+    mount(['login_link'])
+    const flyout = zLayers(readSource('pages', 'chat', 'SessionFlyout.tsx'))
+    expect(flyout.length).toBeGreaterThan(0)
+    expect(overlayZ()).toBeGreaterThan(Math.max(...flyout))
+  })
+
+  it('the overlay sits above the focus-peek rail toggle', () => {
+    mount(['login_link'])
+    const rail = readSource('App.tsx')
+      .split('\n')
+      .filter(line => line.includes('focus-peek-'))
+      .flatMap(zLayers)
+    expect(rail.length).toBeGreaterThan(0)
+    expect(overlayZ()).toBeGreaterThan(Math.max(...rail))
+  })
+
+  it('the overlay shares the shared Modal layer, not a private one', () => {
+    mount(['login_link'])
+    const modal = readSource('components', 'Modal.tsx')
+    const backdrop = /'z-\[10000\]' : 'z-\[(\d+)\]'/.exec(modal)
+    expect(backdrop).not.toBeNull()
+    expect(overlayZ()).toBe(Number(backdrop![1]))
   })
 })

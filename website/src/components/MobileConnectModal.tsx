@@ -98,9 +98,14 @@ export default function MobileConnectModal({
   // registered renderer for a denied or absent method draws nothing.
   const editionSections = getMobileConnectRenderers().filter(r => kinds.includes(r.kind))
 
+  // z-[100] is the shared Modal layer (Modal.tsx). The dialog opens from the
+  // sidebar while the chat page's sessions flyout may be expanded, and that
+  // flyout, its drawer morph and the focus-peek rail toggle sit at z-[59]..z-[61]
+  // above the chat pane; on the chat-pane ceiling (z-50) the dialog and its
+  // backdrop painted underneath them.
   return (
     <div
-      className="fixed inset-0 z-50 bg-bg/80 backdrop-blur-xs flex items-center justify-center animate-rise"
+      className="fixed inset-0 z-[100] bg-bg/80 backdrop-blur-xs flex items-center justify-center animate-rise"
       role="presentation"
     >
       <div
