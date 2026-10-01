@@ -115,13 +115,13 @@ from kiro_crew.artifact_store.rules import (  # noqa: F401 — re-export for API
     _SLUG_NORMALIZE_RE,
     _SLUG_RE,
     _SVG_ROOT_RE,
-    _TAG_RE,
     ALLOWED_KINDS,
     ALLOWED_SOURCES,
     DOC_EXTENSIONS,
     MAX_DESCRIPTION_LEN,
     MAX_NAME_LEN,
     MAX_SOURCE_PATH_LEN,
+    MAX_TAG_LEN,
     MAX_TAGS,
     USER_SELECTABLE_KINDS,
     _infer_kind,
@@ -138,6 +138,7 @@ from kiro_crew.artifact_store.rules import (  # noqa: F401 — re-export for API
     detect_editor_kind,
     has_unthemed_hardcoded_colors,
     is_document_path,
+    normalize_tag,
     slugify,
 )
 from kiro_crew.config.loader import KiroCrewConfig, config_dir
@@ -199,6 +200,7 @@ __all__ = [
     "MAX_NAME_LEN",
     "MAX_SOURCE_PATH_LEN",
     "MAX_TAGS",
+    "MAX_TAG_LEN",
     "MAX_VERSIONS",
     "Mapping",
     "MappingProxyType",
@@ -234,6 +236,7 @@ __all__ = [
     "json",
     "logger",
     "logging",
+    "normalize_tag",
     "os",
     "pinned_fs",
     "re",
@@ -1715,6 +1718,10 @@ class ArtifactStore:
         unlocked reads safe — the worst case is a stale-but-valid snapshot
         for an artifact that was just renamed.
 
+        ``tag`` is read through the tag rule (``normalize_tag``), so a label
+        matches in whichever Unicode spelling it was typed, and a value that is
+        not a well-formed tag matches nothing.
+
         ``session_key`` scopes to one originating chat session (the in-session
         artifact panel's query). Like ``folder``, it distinguishes absent from
         empty: ``None`` doesn't scope, while ``""`` matches only artifacts with
@@ -1731,6 +1738,13 @@ class ArtifactStore:
         """
         with self._lock:
             meta_paths = list(self._iter_meta_paths())
+        if tag:
+            # Tags are stored in their NFC spelling, so the filter is read the same
+            # way; a value that is not a tag at all can match no stored tag.
+            try:
+                tag = normalize_tag(tag)
+            except ValueError:
+                return []
         results: _List[Artifact] = []
         for meta_path in meta_paths:
             try:

@@ -66,14 +66,70 @@ ALLOWED_SOURCES = frozenset(
     }
 )
 
-#: Maximum number of tags per artifact. Per-tag length is bounded by ``_TAG_RE``.
+#: Maximum number of tags per artifact. Per-tag length is bounded by ``MAX_TAG_LEN``.
 MAX_TAGS = 16
+
+#: Maximum length of one tag, in code points of its NFC form: the count a reader
+#: perceives as characters. Bytes would hand a CJK tag a third of an ASCII tag's
+#: room, and pre-NFC code points would make the same visible label pass or fail
+#: on the keyboard that typed it.
+MAX_TAG_LEN = 64
+
+#: The separators a tag may carry between letters, marks and digits.
+_TAG_SEPARATORS = frozenset("_:.-")
+
+#: Unicode general-category initials a tag is made of: letters, marks and digits.
+#: Marks are the combining characters NFC leaves standing beside their base
+#: (Devanagari vowel signs, Thai tone marks, Arabic harakat); without them whole
+#: scripts could not be written as tags. Everything else is refused: punctuation
+#: other than the separators, symbols and emoji, and every control, format
+#: (zero-width, bidi override) and whitespace character, so a tag is always
+#: visible and has one unambiguous spelling.
+_TAG_BODY_CATEGORIES = ("L", "M", "N")
+
+#: A tag opens with a letter or digit: a mark needs a base to attach to, and a
+#: leading separator reads as a flag or a path.
+_TAG_FIRST_CATEGORIES = ("L", "N")
 
 # Slug pattern: lowercase letters, digits, hyphens. 1-80 chars. No leading or
 # trailing hyphen. Single-character slugs are allowed for trivial names.
 _SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?\Z")
-_TAG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_:.-]{0,63}\Z")
 _SLUG_NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_tag(tag: str) -> str:
+    """Return the stored spelling of a well-formed tag, or raise ``ValueError`` saying why.
+
+    A tag is a user-facing label that lives only in artifact metadata: never a
+    file name, a URL segment or a query identifier. That job belongs to the slug,
+    which stays ASCII by transliterating (``slugify``). A label's alphabet is the
+    user's alphabet, so after NFC normalization a tag is Unicode letters, marks
+    and digits plus ``_``, ``:``, ``.`` and ``-``, opening with a letter or digit,
+    at most :data:`MAX_TAG_LEN` code points. The stored spelling is the NFC form,
+    so one label has one spelling however it was typed.
+
+    This is the ONE tag rule: the store validates through it and the MCP
+    argument gate (``validation.py``) checks tag arguments through it, so the
+    two cannot drift. The reason in the ``ValueError`` is plain English and is
+    shown to the caller as-is.
+    """
+    canonical = unicodedata.normalize("NFC", tag)
+    if not canonical:
+        raise ValueError("a tag cannot be empty")
+    if len(canonical) > MAX_TAG_LEN:
+        raise ValueError(
+            f"a tag is at most {MAX_TAG_LEN} characters (this one has {len(canonical)})"
+        )
+    if unicodedata.category(canonical[0])[0] not in _TAG_FIRST_CATEGORIES:
+        raise ValueError("a tag must start with a letter or digit")
+    for ch in canonical:
+        if ch in _TAG_SEPARATORS or unicodedata.category(ch)[0] in _TAG_BODY_CATEGORIES:
+            continue
+        raise ValueError(
+            f"character {ch!r} (U+{ord(ch):04X}) is not allowed in a tag: "
+            "use letters, digits, '_', ':', '.' or '-'"
+        )
+    return canonical
 
 
 def slugify(name: str) -> str:
@@ -412,10 +468,16 @@ def _validate_tags(tags: list[str] | None) -> _List[str]:
         raise ArtifactValidationError(f"too many tags ({len(tags)} > {MAX_TAGS})")
     cleaned: _List[str] = []
     for t in tags:
-        if not isinstance(t, str) or not _TAG_RE.match(t):
-            raise ArtifactValidationError(f"invalid tag {t!r}: must match {_TAG_RE.pattern}")
-        if t not in cleaned:  # preserve order, drop dupes
-            cleaned.append(t)
+        if not isinstance(t, str):
+            raise ArtifactValidationError(
+                f"invalid tag {t!r}: a tag must be a string, got {type(t).__name__}"
+            )
+        try:
+            canonical = normalize_tag(t)
+        except ValueError as exc:
+            raise ArtifactValidationError(f"invalid tag {t!r}: {exc}") from None
+        if canonical not in cleaned:  # preserve order; one label keeps one spelling
+            cleaned.append(canonical)
     return cleaned
 
 

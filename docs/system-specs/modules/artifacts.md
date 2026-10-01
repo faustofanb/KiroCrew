@@ -190,7 +190,7 @@ Incognito/temporary artifact persistence restrictions remain unchanged.
 | `pinned` | bool | "Starred" — user-curated keep flag (default `false`). Drives the Artifacts page **Starred** view. Metadata-only; toggling does NOT bump `version`. |
 | `auto_registered` | bool | `true` when the store created this record automatically from a chat-emitted `<mcwidget>` (see [Widget auto-registration](#widget-auto-registration)) rather than from an explicit save. Sweepable by the retention pass while unpinned; tolerant-loaded (pre-existing artifacts default `false`, so they are never swept). |
 | `description` | string | Optional, ≤ 2,000 chars |
-| `tags` | string[] | ≤ 16 tags, alphanumeric / `_`, `:`, `.`, `-` |
+| `tags` | string[] | ≤ 16 labels, each a well-formed tag (see [Validation & Limits](#validation--limits)) stored in its NFC spelling |
 | `version` | int | Latest snapshot version; bumps when a content change is snapshotted |
 | `created_at` / `updated_at` | string | ISO 8601 UTC microseconds |
 
@@ -276,8 +276,9 @@ Rule data an owner's own code reads has one live binding, in the owner, and the
 store reads it through the owner module too (`create_image` truncates to
 `MAX_NAME_LEN` / `MAX_DESCRIPTION_LEN`, and `update` pre-checks
 `ALLOWED_EVENT_TYPES`). That covers the field limits and grammar
-(`MAX_NAME_LEN`, `MAX_DESCRIPTION_LEN`, `MAX_TAGS`, `MAX_SOURCE_PATH_LEN`,
-`_SLUG_RE`, `_TAG_RE`), the kind sets and inference maps (`ALLOWED_KINDS`,
+(`MAX_NAME_LEN`, `MAX_DESCRIPTION_LEN`, `MAX_TAGS`, `MAX_TAG_LEN`,
+`MAX_SOURCE_PATH_LEN`, `_SLUG_RE`, `normalize_tag`), the kind sets and inference
+maps (`ALLOWED_KINDS`,
 `ALLOWED_SOURCES`, `_EXT_KIND_MAP`, `_HTML_SNIFF_MARKERS`) in `rules`, the
 event-type vocabulary (`ALLOWED_EVENT_TYPES`) in `records`, and the folder path
 limits (`FOLDER_PATH_SEP`, `MAX_FOLDER_DEPTH`) in `folders`. The facade copy of
@@ -343,7 +344,11 @@ doc stored as `widget` renders as raw inner HTML).
 Schemas live in `validation.py` (`ARTIFACT_*_SCHEMA`) and are registered in
 `MCP_CORE_SCHEMAS`. The MCP tool layer always proxies through the HTTP API so
 SEL audit, restricted-session enforcement, and any future authorization
-middleware live in one place.
+middleware live in one place. The `tags` and `tag` arguments are checked by the
+store's own tag rule (`rules.normalize_tag`, called from the schemas' custom
+validator) rather than by a pattern of their own, so the tool and the store
+cannot disagree about a tag; the schema fields keep only the count and length
+caps.
 
 ### CLI (`kirocrew artifact`)
 
@@ -928,12 +933,26 @@ version and auto-widget caps are the store's, in `kiro_crew.artifacts`.
 | `slug` | regex `^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$`, ≤ 80 chars |
 | `name` | ≤ 200 chars, non-empty |
 | `description` | ≤ 2,000 chars |
-| `tags` | ≤ 16 tags; each ≤ 64 chars |
+| `tags` | ≤ 16 tags; each ≤ 64 code points of its NFC form (`MAX_TAG_LEN`), made of Unicode letters, marks and digits plus `_`, `:`, `.`, `-`, opening with a letter or digit (`normalize_tag`) |
 | `content` | ≤ 25 MiB (`MAX_CONTENT_BYTES`) |
 | `kind` | one of `widget` / `html` / `markdown` / `svg` / `json` / `text` / `image` / `webapp` |
 | `source` | stored values: `chat` / `cron` / `subagent` / `manual` / `import` / `dashboard` / `slack` / `cli` / `task-runner` / `unknown`; the MCP save schema accepts the first five explicitly |
 | `MAX_VERSIONS` | 50 (oldest pruned beyond cap) |
 | `MAX_AUTO_WIDGET_ARTIFACTS` | 200 (oldest **unpinned auto-registered** widgets pruned beyond cap) |
+
+A tag is a user-facing label that lives only in `meta.json` — never a file
+name, a URL segment or a query identifier, which is the slug's job (`slugify`
+keeps slugs ASCII by transliterating) — so its alphabet is the user's: `売上`,
+`café`, `München` and `हिन्दी` are tags. Marks are admitted because NFC leaves
+some standing beside their base letter (Devanagari vowel signs, Thai tone
+marks) and without them whole scripts could not be written. Everything else is
+refused with a plain-English reason: punctuation other than the four
+separators, symbols and emoji, and every control, format (zero-width, bidi
+override) and whitespace character, so a tag is always visible and has one
+unambiguous spelling. The store writes the NFC form, two spellings of one
+label dedupe to one tag, and `list(tag=…)` reads its filter through the same
+rule, so a label matches however it was typed and a filter that is not a tag
+matches nothing. ASCII tags are unchanged by all of this.
 
 ## Security
 
