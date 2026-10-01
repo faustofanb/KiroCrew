@@ -279,12 +279,15 @@ python3 <this skill's dir>/scripts/patrol_budget.py renew \
 
 Each cycle:
 
-1. **`work_ledger_read` first, every cycle.** It returns the conductor record,
-   every item with all its fields, each item's derived `orphaned`, `stale` and
-   `acceptance_concrete` flags, the newest events per item, and a ready-to-pipe
+1. **`work_ledger_read` with `compact=true` first, every cycle.** It returns the
+   conductor record and, per item, the status columns plus the derived
+   `orphaned`, `stale` and `acceptance_concrete` flags — no events, acceptance or
    `accept_batch`. This one read replaces the whole transcript-reading cycle, and
-   it is O(record) — which is why this loop's cost does not grow with its own
-   history. An item is never `stale` on the strength of silence alone: its worker
+   it stays small however many items the board holds. The full read (no
+   `compact`) adds every field, the newest events and a ready-to-pipe
+   `accept_batch`; take it, or `item_id=<id>` for one item, only when a `done`
+   item needs its bar (step 3). A full read too large for the tool-result limit
+   comes back trimmed with `truncated: true` and says what it left out. An item is never `stale` on the strength of silence alone: its worker
    also has to be not running, and its last word has to have left the next move
    with the worker, so a `done` item waiting on you is not flagged.
 2. **Act on three statuses, and only three:**
@@ -300,7 +303,7 @@ Each cycle:
    values, and why you must not treat one as the other.
 3. **Verify every `done` with the evaluator — never by reading the child's
    transcript and judging, and never by believing the claim.** Take the
-   `accept_batch` that `work_ledger_read` already built, **keep only the entries
+   `accept_batch` from a full `work_ledger_read` (no `compact`), **keep only the entries
    whose item is currently `status: done`** — each entry carries that status, so
    the filter is a read of the document you already have — and pipe that filtered
    document through a **quoted heredoc**:

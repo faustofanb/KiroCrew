@@ -3906,13 +3906,16 @@ you stop. (The loop is on a timer today. When `monitor_start` accepts a
 `watch: "work-ledger"` field, gate on that instead and the quiet cycles stop
 costing a turn.)
 
-Each cycle, `work_ledger_read` FIRST. It returns every item, the derived
-`orphaned` and `stale` flags, the newest events, and a ready-to-pipe
-`accept_batch`. Then act by status, and only on three of them:
+Each cycle, `work_ledger_read` with `compact=true` FIRST. It returns every
+item's status columns and the derived `orphaned` and `stale` flags — small
+enough to read every round. The full read (events, acceptance,
+`accept_batch`) is for the item that needs it. Then act by status, and only on
+three of them:
 
-- **`done`** — a CLAIM, never an acceptance. Filter the returned
-  `accept_batch` down to the items whose status is `done`, pipe THAT into
-  `accept_eval.py`, and record its answer with `work_ledger_record`
+- **`done`** — a CLAIM, never an acceptance. Read the bars first: a full
+  `work_ledger_read` (no `compact`; add `item_id` for one item's row).
+  Filter the `accept_batch` down to the items whose status is `done`, pipe
+  THAT into `accept_eval.py`, and record its answer with `work_ledger_record`
   `action=verdict`. The batch carries every open item with a concrete
   acceptance, `progress` ones included, and a stub that already exists is a
   genuine `pass` on unfinished work — so the unfiltered batch would let you
