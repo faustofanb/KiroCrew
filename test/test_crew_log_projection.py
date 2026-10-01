@@ -708,6 +708,34 @@ def test_usage_snapshot_row_is_not_stamped_by_a_later_completion():
     assert "used" not in snapshot["context_turns"][0]
 
 
+def test_usage_the_ordinal_memo_stays_bounded_over_a_long_session():
+    """MUTATION-SENSITIVE: the (unit, turn) -> ordinal memo must not grow without bound.
+
+    The memo lets a rewound turn reuse its ordinal, but it is checkpointed state copied
+    per entry, so it is capped at ``CONTEXT_ORDINAL_MEMO_LIMIT`` and evicts oldest-first.
+    Driving far more distinct turns than the cap must leave the map at the cap, never
+    larger -- while the counter keeps advancing so each new turn still gets its true
+    session-global ordinal (the cap bounds the memory, not the numbering).
+    """
+    state = crew_log._usage_start()
+    overflow = crew_log.CONTEXT_ORDINAL_MEMO_LIMIT + 50
+    for turn in range(1, overflow + 1):
+        ordinal = crew_log._count_turn_ordinal(state, "acp-1", turn)
+        # Each distinct turn advances the counter, so its ordinal is its true position.
+        assert ordinal == turn
+    # The memo never exceeds its cap, no matter how many turns passed through it.
+    assert len(state["context_turn_ordinals"]) == crew_log.CONTEXT_ORDINAL_MEMO_LIMIT
+    # The retained keys are the MOST RECENT ones; the oldest turns were evicted.
+    newest = f"acp-1\x00{overflow}"
+    oldest_retained = f"acp-1\x00{overflow - crew_log.CONTEXT_ORDINAL_MEMO_LIMIT + 1}"
+    evicted = f"acp-1\x00{overflow - crew_log.CONTEXT_ORDINAL_MEMO_LIMIT}"
+    assert newest in state["context_turn_ordinals"]
+    assert oldest_retained in state["context_turn_ordinals"]
+    assert evicted not in state["context_turn_ordinals"]
+    # A still-retained recent turn reuses its ordinal rather than taking a new one.
+    assert crew_log._count_turn_ordinal(state, "acp-1", overflow) == overflow
+
+
 def test_usage_an_interrupted_units_open_row_is_not_stamped_by_the_next_unit():
     """MUTATION-SENSITIVE: the seal alone cannot close the unit boundary.
 
