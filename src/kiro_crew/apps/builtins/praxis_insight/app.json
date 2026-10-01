@@ -1,0 +1,31 @@
+{
+  "name": "praxis-insight",
+  "version": "0.1.0",
+  "displayName": "Praxis Insight",
+  "description": "PraxisCode 独有能力的驾驶舱：Work/WorkItem 看板（13 状态词语义）、精确范围审批收件箱（含拒绝后果）、Evidence 六级来源视图、UNKNOWN 对账横幅（UNKNOWN ≠ FAILED）、AgentRun/RunEpoch 追踪。数据当前来自内置的 Praxis 域模拟核心，接缝已按真实 praxisd 的查询接口预留。",
+  "author": "praxiscode",
+  "license": "Apache-2.0",
+  "iconUrl": "/app-assets/praxis-insight/icon.svg",
+  "tags": ["praxis", "work", "approvals", "evidence", "governance"],
+  "defaultEnabled": true,
+  "platform": {
+    "os": ["macos", "linux", "windows"]
+  },
+  "minKiroCrewVersion": "0.1.0",
+  "backend": {
+    "routes": "backend.routes:register_routes"
+  },
+  "ui": {
+    "pages": [
+      {
+        "route": "/praxis-insight",
+        "label": "Praxis Insight",
+        "icon": "Layers"
+      }
+    ]
+  },
+  "permissions": {
+    "api": [],
+    "events": []
+  }
+}
