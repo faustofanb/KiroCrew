@@ -2768,6 +2768,22 @@ def build_cancelled_turn_preamble(
 _TURN_OPENER_ROLES = frozenset({"user", "nudge", "subagent"})
 
 
+def _interrupted_opener_kind(row: dict) -> str:
+    """A short name for the automated delivery that opened an interrupted turn."""
+    role = row.get("role")
+    if role == "nudge":
+        return "a monitor loop cycle"
+    if role == "subagent":
+        return "a sub-agent completion"
+    meta = row.get("meta")
+    kind = meta.get("injectKind") if isinstance(meta, dict) else None
+    return {
+        "cron": "a scheduled job",
+        "mcp_app": "an app message",
+        "synthesis": "a sub-agent synthesis",
+    }.get(kind if isinstance(kind, str) else "", "an automated message")
+
+
 def build_interrupted_turn_preamble(
     messages: list[dict],
     current: dict | None = None,
@@ -2831,14 +2847,28 @@ def build_interrupted_turn_preamble(
     # scrubbed here: a transcript row must not carry a structural marker past it.
     user_text = _neutralize_structural_markers(user_text)
     assistant_text = _neutralize_structural_markers(assistant_text)
+    # Only a ``user`` row is the person's own words. Every other opener is an
+    # automated delivery (a monitor loop's cycle, a sub-agent's completion, a
+    # cron/app/synthesis inject) and must not be framed as something the user
+    # typed -- see docs/system-specs/common/injected-messages.md.
+    opener = messages[opener_idx]
+    if opener.get("role") == "user":
+        whose = "It is the user's most recent request"
+        heading = "Interrupted request"
+    else:
+        whose = (
+            f"It is an automated delivery ({_interrupted_opener_kind(opener)}), not "
+            "something the user typed, and it is the work"
+        )
+        heading = "Interrupted automated delivery"
     lines = [
         "[INTERRUPTED TURN — context restore]",
         "The turn below was cut off when the agent process serving this "
         "conversation stopped, so the restored conversation may not include it. "
-        "It is the user's most recent request, the one you are being asked to "
-        "carry on with. Tool calls it made may already have taken effect.",
+        f"{whose}, the one you are being asked to carry on with. Tool calls it "
+        "made may already have taken effect.",
         "",
-        f"Interrupted request:\n{user_text}",
+        f"{heading}:\n{user_text}",
     ]
     if assistant_text:
         lines += ["", f"Partial response before the interruption:\n{assistant_text}"]
