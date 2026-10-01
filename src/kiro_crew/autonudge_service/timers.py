@@ -412,6 +412,9 @@ def _cancel_timer(self: AutoNudgeService, loop_id: str, *, drop_claims: bool = T
 
 def _arm_timer(self: AutoNudgeService, loop: NudgeLoop, delay: float | None = None) -> None:
     self._cancel_timer(loop.id, drop_claims=False)
+    # Any arm replaces the armed timer, so a push mark naming the old one is stale. A
+    # push re-sets it right after this call.
+    self._pushed_ticks.discard(loop.id)
     self._timers[loop.id] = asyncio.create_task(self._timer(loop, delay))
 
 

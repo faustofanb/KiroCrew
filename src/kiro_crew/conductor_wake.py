@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,73 @@ def _read_binding(worker_slot_key: str) -> "tuple[str, str] | None":
         if binding is not None:
             return binding
     return None
+
+
+#: Pull-forwards one work item may buy its conductor's loop in an hour.
+#:
+#: Not the same bound as ``ledger_wake.MAX_WAKES_PER_ITEM_PER_HOUR``, which the probe
+#: applies to WAKES -- turns spent on an item's news. This one bounds TICKS: a push that
+#: the gate answers quiet spends no wake, so the wake cap never sees it, yet each quiet
+#: tick still runs the probe and can still advance the quiet streak whose floor delivers a
+#: turn anyway. A worker writing ``progress`` in a loop would otherwise buy its conductor
+#: a floor turn every ``_MAX_QUIET_STREAK`` writes, with nothing capping the rate.
+#:
+#: A FIRST GUESS, not a derived number: it is the bar the pod QA harness measures
+#: against. Every trigger counts -- a report, a close and a turn end each arm a tick --
+#: unless the push coalesces into one already armed (:func:`_admit`). Only the push is
+#: capped. The write still lands, and the loop's own scheduled tick still reads it, so
+#: an item over its cap is heard at the patrol cadence instead of at once.
+ITEM_PULLS_PER_HOUR = 12
+
+#: The window :data:`ITEM_PULLS_PER_HOUR` counts over, in seconds.
+_ITEM_WINDOW_SECS = 3600.0
+
+
+def _admit(svc: Any, loop_id: str, item_id: str, now: float) -> bool:
+    """Whether *item_id* may pull *loop_id* forward now, recording it when it may.
+
+    CALL ON THE EVENT LOOP: it reads and writes the service's own tables.
+
+    A push that would buy NOTHING is admitted and not counted, so the cap measures
+    pull-forwards rather than writes. Two such states exist: a pushed tick already armed
+    and not yet started (it has not read the ledger, so it will see this write), and a
+    cycle in flight that already holds a deferred pull-forward (its tail runs one tick
+    for every write that landed during it). Counting those would let a worker's report
+    plus its own turn end spend two of the budget on one tick.
+
+    A service without the tables -- a test stub -- is not capped. An item id of ``""``
+    is not capped either: every caller resolves one from the binding, so an empty one
+    means a binding this module cannot attribute, and dropping its push would turn a
+    lookup gap into a lost wake.
+    """
+    counts = getattr(svc, "_pull_forward_counts", None)
+    if counts is None or not item_id:
+        return True
+    pending = getattr(svc, "_pushed_ticks", ())
+    firing = getattr(svc, "_firing", ())
+    deferred = getattr(svc, "_pulled_forward", ())
+    if loop_id in pending or (loop_id in firing and loop_id in deferred):
+        return True
+    per_loop = counts.setdefault(loop_id, {})
+    recent = [t for t in per_loop.get(item_id, ()) if now - t < _ITEM_WINDOW_SECS]
+    capped: "set[tuple[str, str]]" = getattr(svc, "_pull_forward_capped", set())
+    pair = (loop_id, item_id)
+    if len(recent) >= ITEM_PULLS_PER_HOUR:
+        per_loop[item_id] = recent
+        if pair not in capped:
+            capped.add(pair)
+            logger.info(
+                "conductor wake: item %s reached %d pull-forwards of loop %s within an "
+                "hour -- its further writes wait for the loop's scheduled tick",
+                item_id,
+                ITEM_PULLS_PER_HOUR,
+                loop_id,
+            )
+        return False
+    recent.append(now)
+    per_loop[item_id] = recent
+    capped.discard(pair)
+    return True
 
 
 def work_ledger_loop_id(svc: Any, conductor_slot_key: str) -> str:
@@ -132,8 +200,12 @@ def work_ledger_loop_id(svc: Any, conductor_slot_key: str) -> str:
     return str(getattr(loop, "id", "") or "")
 
 
-async def _fire(svc: Any, conductor_slot_key: str) -> str:
-    """Fire *conductor_slot_key*'s work-ledger loop. The loop id, or ``""``.
+async def _fire(svc: Any, conductor_slot_key: str, item_id: str = "") -> str:
+    """Fire *conductor_slot_key*'s work-ledger loop for *item_id*. The loop id, or ``""``.
+
+    Refused without calling ``fire_now`` once *item_id* has spent its hourly budget of
+    pull-forwards on this loop (:func:`_admit`). The write still landed in the ledger and
+    the loop's own tick still reads it, so a refusal here costs latency, never news.
 
     A refusal is DEBUG and dropped. ``fire_now``'s three refusals all describe a loop
     that either cannot or must not run now, and the scheduled tick reads the same ledger
@@ -142,6 +214,8 @@ async def _fire(svc: Any, conductor_slot_key: str) -> str:
     """
     loop_id = work_ledger_loop_id(svc, conductor_slot_key)
     if not loop_id:
+        return ""
+    if not _admit(svc, loop_id, item_id, time.time()):
         return ""
     try:
         # ``defer_if_firing``: a refusal because the loop is mid-fire is the one refusal
@@ -193,7 +267,7 @@ async def fire_for_worker_slot(worker_slot_key: str) -> str:
     binding = await asyncio.to_thread(_read_binding, worker_slot_key)
     if binding is None:
         return ""
-    return await _fire(svc, binding[0])
+    return await _fire(svc, binding[0], binding[1])
 
 
 def _service_loop(svc: Any) -> "asyncio.AbstractEventLoop | None":
@@ -251,7 +325,7 @@ def fire_for_worker_slot_from_thread(worker_slot_key: str) -> bool:
         running = _service_loop(svc)
         if running is None:
             return False
-        future = asyncio.run_coroutine_threadsafe(_fire(svc, binding[0]), running)
+        future = asyncio.run_coroutine_threadsafe(_fire(svc, binding[0], binding[1]), running)
     except Exception:  # pragma: no cover - the trigger must not see this
         logger.debug("conductor wake: could not schedule a push for %s", worker_slot_key)
         return False

@@ -515,6 +515,54 @@ def test_a_reported_worker_under_construction_is_not_closed(tmp_path):
     assert ledger_wake.worker_closed(state, WORKER) is True, "control: really gone"
 
 
+def _stall_keys(state) -> "list[str]":
+    """The stall observation keys one probe tick over the real ledger produces."""
+    from kiro_crew import ledger_wake
+    from kiro_crew.probes.work_ledger import WorkLedgerProbe
+
+    probe = WorkLedgerProbe(worker_closed=lambda key: ledger_wake.worker_closed(state, key))
+    probe._conductor = CONDUCTOR
+    tick = probe.observe(object())
+    return [obs.key for obs in tick.observations if obs.key.startswith("stall:")]
+
+
+def test_a_reported_worker_whose_restore_read_failed_is_not_closed(tmp_path):
+    """A boot metadata read failure parks the key with no slot; that is not a close.
+
+    The restore keeps such a key in ``unrestored_slot_keys`` so the next snapshot does
+    not erase it, which is the repo's own statement that the session may still exist.
+    Reading it as closed would skip the window for an item that already reported and
+    persist a stall that never resets. The control drops the key and must stall.
+    """
+    from chat_test_helpers import _make_state
+
+    from kiro_crew import ledger_wake
+
+    _bind(status="progress")
+    state = _make_state(tmp_path)
+    state.unrestored_slot_keys = {WORKER}
+    assert state.get_slot(WORKER) is None, "precondition: no slot object exists"
+    assert ledger_wake.worker_closed(state, WORKER) is False
+    assert _stall_keys(state) == [], "no stall observation for an unread key"
+
+    state.unrestored_slot_keys = set()
+    assert ledger_wake.worker_closed(state, WORKER) is True, "control: really gone"
+    assert len(_stall_keys(state)) == 1, "control: the same item stalls once gone"
+
+
+def test_absence_during_an_in_flight_restore_proves_no_close(tmp_path):
+    """A tab the restore has not reached yet has no slot, and is not closed."""
+    from chat_test_helpers import _make_state
+
+    from kiro_crew import ledger_wake
+
+    state = _make_state(tmp_path)
+    state.restoring_open_slots = True
+    assert ledger_wake.worker_closed(state, WORKER) is False
+    state.restoring_open_slots = False
+    assert ledger_wake.worker_closed(state, WORKER) is True, "control: really gone"
+
+
 # ── trigger two, ordering: only a committed close wakes ──────────────────────
 
 
@@ -706,3 +754,219 @@ def test_a_report_written_across_a_restart_wakes_once_at_boot(tmp_path, monkeypa
 def test_a_restart_with_nothing_new_ticks_quiet_and_spends_no_turn(tmp_path, monkeypatch):
     _loop_id, fired = _restored_service_ticks(tmp_path, monkeypatch, report_after="")
     assert fired == []
+
+
+# ── a pushed tick is extra: it keeps the deadline and observes ──────────────
+
+
+def test_a_quiet_pushed_tick_keeps_the_earlier_deadline(tmp_path, monkeypatch):
+    """A push that finds nothing must not move the scheduled check further out.
+
+    Deadline T; a worker's push runs a tick 100 s before it and the gate answers quiet.
+    The deadline stays T. The control is the same quiet tick NOT armed by a push, which
+    is the loop's own scheduled tick and does re-arm a full interval from now.
+    """
+    import time
+
+    monkeypatch.setenv("KIROCREW_AUTONUDGE", "1")
+
+    async def _drive() -> "tuple[float, float, float]":
+        async def _never(_loop) -> bool:
+            raise AssertionError("a quiet tick spends no turn")
+
+        svc = _service(tmp_path / "an", on_fire=_never)
+        loop = await svc.add(CONDUCTOR, "patrol the fleet", idle_secs=3600, watch="work-ledger")
+
+        async def _quiet(_loop) -> bool:
+            return True
+
+        svc._monitor_tick_is_quiet = _quiet  # type: ignore[method-assign]
+        svc._arm_timer = lambda *_a, **_k: None  # type: ignore[method-assign]
+        try:
+            deadline = time.time() + 100
+            loop.next_due_ts = deadline
+            svc._pushed_ticks.add(loop.id)
+            await svc._timer(loop, delay=0.0)
+            kept = loop.next_due_ts
+
+            loop.next_due_ts = deadline
+            before = time.time()
+            await svc._timer(loop, delay=0.0)
+            return deadline, kept, loop.next_due_ts - before
+        finally:
+            svc.stop()
+
+    deadline, kept, control_gap = asyncio.run(_drive())
+    assert kept == deadline
+    assert control_gap >= 3600 - 1, "control: an unpushed quiet tick re-arms a full interval"
+
+
+WORKER_B = "chat-worker-b"
+
+
+def _ledger_service(tmp_path, monkeypatch, *, closed: "set[str]"):
+    """A real service whose real gate reads the real ledger, counting delivered turns."""
+    import kiro_crew.autonudge as autonudge
+
+    monkeypatch.setenv("KIROCREW_AUTONUDGE", "1")
+    delivered: list[int] = []
+    during: list = []
+
+    async def _on_fire(_loop) -> bool:
+        delivered.append(len(delivered) + 1)
+        if during:
+            await during.pop(0)()
+        return True
+
+    svc = _service(tmp_path / "an", on_fire=_on_fire, worker_closed=lambda key: key in closed)
+    monkeypatch.setattr(autonudge, "get_instance", lambda: svc)
+    return svc, delivered, during
+
+
+async def _push_and_settle(svc, loop_id: str, worker: str) -> None:
+    """One worker push, then every tick it (and any tail it arms) runs, to completion."""
+    await conductor_wake.fire_for_worker_slot(worker)
+    for _ in range(5):
+        task = svc._timers.get(loop_id)
+        if task is None or task.done():
+            return
+        if loop_id not in svc._pushed_ticks and loop_id not in svc._pushed_running:
+            # Only an armed deadline tick is left, hours away: nothing more to settle.
+            return
+        await asyncio.wait_for(asyncio.shield(task), timeout=10)
+
+
+def test_a_close_after_a_done_wake_buys_no_second_turn(tmp_path, monkeypatch):
+    """The done report wakes once; the close lands on the follow-up window and does not.
+
+    The follow-up allowance is the loop's own second turn and survives for its next
+    scheduled tick. A fresh ``question`` on another item in the same window is news, and
+    buys exactly one turn.
+    """
+    closed: set[str] = set()
+    done_item = _bind(WORKER)
+    other_item = _bind(WORKER_B)
+
+    async def _drive() -> "tuple[list[int], list[int], list[int], int]":
+        svc, delivered, _during = _ledger_service(tmp_path, monkeypatch, closed=closed)
+        loop = await svc.add(CONDUCTOR, "patrol the fleet", idle_secs=3600, watch="work-ledger")
+        try:
+            work_ledger.apply_worker_report(CONDUCTOR, done_item, status="done", summary="d")
+            await _push_and_settle(svc, loop.id, WORKER)
+            after_done = list(delivered)
+            assert loop.monitor.followup_ticks == 1, "precondition: the wake left its follow-up"
+
+            closed.add(WORKER)
+            await _push_and_settle(svc, loop.id, WORKER)
+            after_close = list(delivered)
+
+            work_ledger.apply_worker_report(
+                CONDUCTOR, other_item, status="question", summary="RULING: a -- b -- a"
+            )
+            await _push_and_settle(svc, loop.id, WORKER_B)
+            return after_done, after_close, list(delivered), loop.monitor.followup_ticks
+        finally:
+            svc.stop()
+
+    after_done, after_close, after_question, followups = asyncio.run(_drive())
+    assert after_done == [1]
+    assert after_close == [1], "the close bought no second delivered turn"
+    assert after_question == [1, 2], "a new question in the window is exactly one turn"
+    assert followups == 1, "the scheduled cadence still owns the free follow-up"
+
+
+def _storm_during_a_turn(tmp_path, monkeypatch, *, news: bool) -> "list[int]":
+    """Ten pushes from two workers land while the woken turn is in flight."""
+    first = _bind(WORKER)
+    second = _bind(WORKER_B)
+
+    async def _drive() -> "list[int]":
+        svc, delivered, during = _ledger_service(tmp_path, monkeypatch, closed=set())
+        loop = await svc.add(CONDUCTOR, "patrol the fleet", idle_secs=3600, watch="work-ledger")
+
+        async def _storm() -> None:
+            assert loop.id in svc._firing, "precondition: the storm lands mid-turn"
+            for n in range(5):
+                for worker, item in ((WORKER, first), (WORKER_B, second)):
+                    status = "question" if news and n == 4 and worker == WORKER_B else "progress"
+                    work_ledger.apply_worker_report(CONDUCTOR, item, status=status, summary=f"{n}")
+                    await conductor_wake.fire_for_worker_slot(worker)
+
+        during.append(_storm)
+        try:
+            work_ledger.apply_worker_report(
+                CONDUCTOR, first, status="question", summary="RULING: a -- b -- a"
+            )
+            await _push_and_settle(svc, loop.id, WORKER)
+            # Settle whatever the storm's deferred pull-forward armed.
+            for _ in range(3):
+                task = svc._timers.get(loop.id)
+                if task is None or task.done() or loop.id not in svc._pushed_ticks:
+                    break
+                await asyncio.wait_for(asyncio.shield(task), timeout=10)
+            return list(delivered)
+        finally:
+            svc.stop()
+
+    return asyncio.run(_drive())
+
+
+def test_a_storm_during_a_turn_buys_no_further_turn_without_news(tmp_path, monkeypatch):
+    """The delivered turn re-reads the whole ledger; progress after it is not news."""
+    assert _storm_during_a_turn(tmp_path, monkeypatch, news=False) == [1]
+
+
+def test_a_storm_during_a_turn_with_news_buys_exactly_one_more(tmp_path, monkeypatch):
+    assert _storm_during_a_turn(tmp_path, monkeypatch, news=True) == [1, 2]
+
+
+# ── an item cannot spend its conductor's turn budget ─────────────────────────
+
+
+def test_an_item_pulls_its_conductor_forward_at_most_twelve_times_an_hour(
+    tmp_path, monkeypatch, caplog
+):
+    """The thirteenth report still lands in the ledger; it only stops pulling forward.
+
+    Each report arrives after the previous pushed tick began (the mark is cleared as a
+    tick start clears it), so none coalesces and each would arm a new tick. The loop's
+    own deadline and active state are untouched, so its scheduled tick still runs.
+    """
+    import logging
+
+    import kiro_crew.autonudge as autonudge
+
+    monkeypatch.setenv("KIROCREW_AUTONUDGE", "1")
+    item_id = _bind(status="progress")
+    arms: list[float | None] = []
+    cap = conductor_wake.ITEM_PULLS_PER_HOUR
+
+    async def _drive() -> "tuple[list[str], bool]":
+        svc = _service(tmp_path / "an")
+        monkeypatch.setattr(autonudge, "get_instance", lambda: svc)
+        loop = await svc.add(CONDUCTOR, "patrol the fleet", idle_secs=3600, watch="work-ledger")
+        deadline = loop.next_due_ts
+        svc._arm_timer = lambda _l, delay=None: arms.append(delay)  # type: ignore[method-assign]
+        fired: list[str] = []
+        try:
+            for n in range(cap + 1):
+                work_ledger.apply_worker_report(
+                    CONDUCTOR, item_id, status="question", summary=f"{n}"
+                )
+                fired.append(await conductor_wake.fire_for_worker_slot(WORKER))
+                svc._pushed_ticks.discard(loop.id)
+            assert loop.next_due_ts == deadline, "the slow tick's deadline is untouched"
+            return fired, loop.active
+        finally:
+            svc.stop()
+
+    with caplog.at_level(logging.INFO, logger="kiro_crew.conductor_wake"):
+        fired, active = asyncio.run(_drive())
+    assert cap == 12
+    assert fired[0] and fired[:cap] == [fired[0]] * cap, "the first twelve pull forward"
+    assert fired[cap] == "", "the thirteenth does not"
+    assert arms == [0.0] * cap
+    assert active is True, "the loop and its scheduled tick stay armed"
+    assert _item(item_id).summary == str(cap), "the thirteenth report still landed"
+    tripped = [r for r in caplog.records if "pull-forwards of loop" in r.getMessage()]
+    assert len(tripped) == 1 and tripped[0].levelno == logging.INFO

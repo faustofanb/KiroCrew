@@ -751,6 +751,22 @@ class AutoNudgeService:
         #: the one site that applies it (``_run_fire_cycle``'s tail) plus the removal
         #: path, so a claim cannot outlive its loop.
         self._pulled_forward: set[str] = set()
+        #: Loop ids whose ARMED timer was set by a worker's push and has not started.
+        #: Moved to ``_pushed_running`` when that tick begins, and dropped by every
+        #: other arm, so it always describes the timer actually armed. A push landing
+        #: while it is set buys nothing new: the armed tick has not read the ledger yet.
+        self._pushed_ticks: set[str] = set()
+        #: Loop ids whose RUNNING tick was armed by a worker's push. Such a tick goes
+        #: through the probe gate rather than spending the post-wake follow-up (the
+        #: free follow-up belongs to the loop's own cadence), and a quiet answer keeps
+        #: the loop's earlier deadline rather than pushing it out. Reset at every tick.
+        self._pushed_running: set[str] = set()
+        #: ``loop id -> item id -> wall-clock times`` of the pull-forwards that item
+        #: bought its conductor in the last hour, and the ``(loop id, item id)`` pairs
+        #: whose cap has already been logged in the current window. Read and written by
+        #: ``conductor_wake`` on the event loop; released with the loop.
+        self._pull_forward_counts: dict[str, dict[str, list[float]]] = {}
+        self._pull_forward_capped: set[tuple[str, str]] = set()
         # Loop ids whose CURRENT tick observed a wake but has not yet had its fire
         # confirmed. Transient on purpose: it is a claim about a turn in flight,
         # so a restart must forget it rather than charge a turn that never ran.

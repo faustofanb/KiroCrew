@@ -56,6 +56,15 @@ async def _timer(self: AutoNudgeService, loop: NudgeLoop, delay: float | None = 
         return
     if shutdown_event.is_set():
         return
+    # Whether THIS tick is one a worker's push armed. Moved off the armed-timer mark
+    # the moment the tick starts, so a push landing from here on is news this tick may
+    # not see and is free to arm the next one; and reset on every tick, so a tick that
+    # returns early below leaves nothing for a later scheduled tick to inherit.
+    if loop.id in self._pushed_ticks:
+        self._pushed_ticks.discard(loop.id)
+        self._pushed_running.add(loop.id)
+    else:
+        self._pushed_running.discard(loop.id)
     if is_structured_monitor_loop(loop):
         assert loop.monitor is not None
         waiting_for_terminal_completion = self._waits_for_terminal_completion(loop)
@@ -267,6 +276,8 @@ async def _timer(self: AutoNudgeService, loop: NudgeLoop, delay: float | None = 
             loop.id,
         )
         tick_is_quiet = False
+    pushed = loop.id in self._pushed_running
+    self._pushed_running.discard(loop.id)
     if tick_is_quiet:
         # A quiet tick MUST re-arm itself. Nothing else will: the delivered
         # paths re-arm through notify_turn_complete (dashboard slots) or
@@ -288,7 +299,17 @@ async def _timer(self: AutoNudgeService, loop: NudgeLoop, delay: float | None = 
         # a loop removed during the observation is not resurrected by its own
         # in-flight tick.
         if loop.active and loop.id in self._loops:
-            loop.next_due_ts = time.time() + loop.idle_secs
+            now = time.time()
+            fresh = now + loop.idle_secs
+            if pushed and loop.next_due_ts > now:
+                # A tick a worker's push brought forward is EXTRA. Re-arming it at a
+                # full interval from now would move a deadline that was still ahead
+                # further out, so every quiet push -- a worker's turn ending, say --
+                # would delay the scheduled check it was meant to precede. The earlier
+                # of the two keeps the slow tick where it was.
+                loop.next_due_ts = min(loop.next_due_ts, fresh)
+            else:
+                loop.next_due_ts = fresh
             self._persist_soon()
             self._arm_from_deadline(loop)
         return
@@ -317,6 +338,7 @@ async def _timer(self: AutoNudgeService, loop: NudgeLoop, delay: float | None = 
             if loop.active and loop.id in self._loops:
                 if pulled_forward:
                     self._arm_timer(loop, delay=0.0)
+                    self._pushed_ticks.add(loop.id)
                 else:
                     self._arm_from_deadline(loop)
 
@@ -698,6 +720,9 @@ async def fire_now(
       person behind it reports the refusal and is pressed again, while the crew-log
       wake's caller is a drain thread with nobody to tell -- and a deadline re-arm on
       an hours-long patrol cadence would hold a worker's report for hours.
+      The same flag marks the tick it does arm as a worker's push: that tick observes
+      the subject instead of spending the post-wake follow-up, and a quiet answer keeps
+      the loop's earlier deadline.
 
     NO SUSPENSION POINT, and that is the design rather than an omission.
     ``async def`` for the caller's convenience, but nothing inside awaits, so
@@ -750,6 +775,18 @@ async def fire_now(
             self._pulled_forward.add(loop_id)
         return None, "loop is already firing", 409
     self._arm_timer(loop, delay=0.0)
+    if defer_if_firing:
+        # A worker's push, not a person's press: the tick it armed is marked so the gate
+        # observes rather than spending the post-wake follow-up, and so a quiet answer
+        # keeps the loop's deadline. Logged at DEBUG because it happens once per worker
+        # write, turn end and close; the operator's button keeps its INFO line below.
+        self._pushed_ticks.add(loop_id)
+        logger.debug(
+            "AutoNudge: loop %s pulled forward by a worker's write -- cycle %d armed to run now",
+            loop.id,
+            loop.cycle_count + 1,
+        )
+        return loop, "", 200
     logger.info(
         "AutoNudge: loop %s brought forward by hand — cycle %d armed to run now",
         loop.id,

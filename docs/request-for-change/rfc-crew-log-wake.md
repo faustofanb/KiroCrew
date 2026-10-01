@@ -170,6 +170,10 @@ Existence is read through `DashboardState.slot_exists`, not `get_slot`.
 half-finished session, and the import path retracts its slot from the table
 across its async tail while keeping the construction mark. Both are an open
 session, so a worker that is rehydrating or resuming never reads as closed.
+Two states with no slot object read as open too: a key the boot restore could
+not read (`unrestored_slot_keys`, kept because the read failed, not because
+the session is gone), and every key while a restore is still in flight
+(`restoring_open_slots`), when a tab not reached yet has no slot.
 
 So the window is skipped only for an item that has REPORTED at least once
 (`last_report_at` set). A report proves the first cause: the worker was there, it
@@ -290,6 +294,15 @@ from the existing timer rather than from a queue of envelopes. A `fire_now`
 that arrives while the loop is in `_run_fire_cycle` is refused, and the
 re-arm at the end of that cycle covers the report that caused it.
 
+A pulled-forward tick is extra, and two rules keep it from costing more than
+the news it carries. It never spends the post-wake follow-up tick: that free
+second turn belongs to the loop's own cadence, so a push landing right after a
+wake (a worker's close after its `done` report, or the reports that arrived
+while the woken turn ran) goes through the probe and wakes only for an
+observation the delivered turn did not already carry. And a pulled-forward tick
+the gate answers quiet keeps the loop's existing deadline when that is earlier
+than a fresh interval, so a quiet push never delays the scheduled check.
+
 The kernel's own coalescing window is NOT applied to these observations. A
 `WAKE` waits out `irq.DEFAULT_COALESCE_SECS` (240 s) per entry, and the tick that
 finds it still young answers quiet and re-arms at the loop's cadence -- so a
@@ -297,6 +310,20 @@ pulled-forward tick would find the `question` and then hold it a whole cadence.
 That floor exists for a subject whose sub-observations may not exist yet; a
 report is complete when written and a stall is already decided, so the probe
 emits both as `IMMEDIATE`, which skips the delay and keeps the dedupe mask.
+
+### 3.5 Budget
+
+Turns per item are already bounded by the probe's
+`MAX_WAKES_PER_ITEM_PER_HOUR`. Pull-forwards are bounded separately, because a
+quiet tick spends no wake but still runs the probe and still advances the quiet
+streak whose floor delivers a turn anyway. One item may pull its conductor's
+loop forward at most 12 times in a sliding hour (`ITEM_PULLS_PER_HOUR` in
+`conductor_wake`); a push that coalesces into a tick already armed, or into a
+cycle already holding a deferred pull-forward, is not counted. Past the cap the
+write still lands and the scheduled tick still reads it; only the push is
+dropped, and one INFO line says so per item per window. The number is a first
+guess matched to the QA bar, not derived; the count lives in the service beside
+the loop and resets on restart.
 
 ## 4. Cost
 
@@ -307,7 +334,7 @@ emits both as `IMMEDIATE`, which skips the delay and keeps the dedupe mask.
 | delay from worker close to conductor turn | `idle_secs` + staleness window | seconds |
 | delay from a worker turn that never reported | `idle_secs` + staleness window | staleness window |
 | patrol cadence the skill can set | minutes | hours |
-| new timers, stores, maps | none | none |
+| new timers, stores, maps | none | one in-memory pull-forward count per loop (3.5) |
 
 ## 5. Security
 
@@ -316,7 +343,8 @@ emits both as `IMMEDIATE`, which skips the delay and keeps the dedupe mask.
   store under the conductor's own identity, exactly as on a scheduled tick.
 - A worker cannot spend the conductor's budget faster than Phase 3 allows.
   Every pull-forward runs the same `MAX_WAKES_PER_ITEM_PER_HOUR` cap, cycle cap
-  and wall-clock budget; a report storm collapses into one tick per cycle.
+  and wall-clock budget, and an item's pull-forwards are capped on their own
+  (3.5); a report storm collapses into one tick per cycle.
 - The hook runs on the eager drain thread, never on the writer's thread, so a
   slow or failing lookup cannot delay a worker's append; the drop counter
   `eager_dropped` already measures back-pressure.

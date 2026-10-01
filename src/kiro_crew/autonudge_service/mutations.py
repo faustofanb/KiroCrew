@@ -983,6 +983,10 @@ def remove_sync(
     # forgotten in another outlives its loop, and an id reused by a later loop would
     # inherit a pull-forward nobody asked for.
     self._pulled_forward.discard(loop_id)
+    self._pushed_ticks.discard(loop_id)
+    self._pushed_running.discard(loop_id)
+    self._pull_forward_counts.pop(loop_id, None)
+    self._pull_forward_capped = {pair for pair in self._pull_forward_capped if pair[0] != loop_id}
     self._accepted_monitor_turns.pop(loop_id, None)
     if persist:
         self._save()
