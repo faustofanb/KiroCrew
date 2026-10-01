@@ -220,9 +220,11 @@ through the per-session dedup and aggregate budget in
 `src/kiro_crew/image_ledger.py` → `apply_image_budget`, which drops a payload
 the conversation already carries and degrades a block past the session's byte
 budget to a text marker — and tells the user so, as a notice row in the
-transcript. A kiro-cli compaction refunds the budget for the images it
-summarized away, so a long conversation can keep attaching pictures. Its
-constants and the measurement behind them are in the
+transcript. On a kiro-cli build whose compaction tail has been verified, a
+compaction refunds the budget for the images it summarized away, so a long
+conversation can keep attaching pictures; on any other build or backend the
+budget only ever charges, and `/new` starts a fresh one. Its constants, the
+verified version range and the measurement behind them are in the
 [acp-client spec](../system-specs/modules/acp-client.md#image-support).
 
 ### Trigger-matched skills

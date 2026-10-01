@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from kiro_crew.image_ledger import invalidate_ledger, normalize_ledger, store_image_ledger
+
 from .. import subagent_persistence as persistence
 from ._component import ManagerComponent
 
@@ -34,6 +36,27 @@ if TYPE_CHECKING:
 
 class ContinuationCoordinator(ManagerComponent):
     """Own continuation transitions while state remains facade-owned."""
+
+    @staticmethod
+    def _restore_image_ledger(conv_key: str, sid: str, raw: object) -> bool:
+        """Give a just-seeded conversation the inline-image ledger its run persisted.
+
+        *raw* is the ``image_ledger`` field of the run's ``state.json``: absent
+        (the run inlined nothing, or predates the field) stores nothing; malformed
+        reads as empty and stores nothing; a ledger naming another conversation
+        is refused, because accounting must not be transplanted onto a sid with
+        unrelated history. A prompt the run had written but never confirmed is
+        read as uncertain, as on any recovery. Not an ``_impl``: it runs on this
+        module's globals, where the ledger functions are imported.
+        """
+        if not isinstance(raw, dict):
+            return False
+        ledger = normalize_ledger(raw)
+        if not ledger["sid"] or ledger["sid"] != sid:
+            return False
+        if not ledger["hashes"] and not ledger["b64_bytes"] and not ledger["recent"]:
+            return False
+        return store_image_ledger(conv_key, invalidate_ledger(ledger))
 
     _persistence = persistence
     __slots__ = ()
@@ -207,14 +230,15 @@ class ContinuationCoordinator(ManagerComponent):
         self._manager._conversations[conv_key] = last_used if last_used is not None else time.time()
         return result
 
-    def _scan_keep_states_impl(self) -> list[tuple[str, str, str, str, str, float]]:
+    def _scan_keep_states_impl(self) -> list[tuple[str, str, str, str, str, float, object]]:
         """Blocking scan for keep runs: read every ``state.json``
         under the subagents dir and collect the promoted conversations.
 
-        Returns ``(conv_id, conv_key, sid, provider, cwd, last_used)`` tuples.
+        Returns ``(conv_id, conv_key, sid, provider, cwd, last_used, image_ledger)``
+        tuples, the last the run's persisted ledger field or ``None``.
         Runs in an executor — no event-loop work here.
         """
-        out: list[tuple[str, str, str, str, str, float]] = []
+        out: list[tuple[str, str, str, str, str, float, object]] = []
         try:
             base = _subagents_dir()
             entries = list(base.iterdir()) if base.is_dir() else []
@@ -265,6 +289,7 @@ class ContinuationCoordinator(ManagerComponent):
                         str(trusted_identity.get("provider") or PROVIDER_LABEL_DEFAULT),
                         str(trusted_identity.get("cwd") or ""),
                         last_used,
+                        state.get("image_ledger"),
                     )
                 )
             except Exception:
@@ -302,7 +327,8 @@ class ContinuationCoordinator(ManagerComponent):
         # conversation whose real last-use is recent.
         found.sort(key=lambda t: t[5], reverse=True)
         seeded = 0
-        for _conv_id, conv_key, sid, provider, cwd, last_used in found:
+        for record in found:
+            _conv_id, conv_key, sid, provider, cwd, last_used, *rest = record
             if conv_key in self._manager._conversations:
                 continue  # live registration wins over the disk snapshot
             # Same on-demand seeding as continue_conversation (also on-loop):
@@ -310,6 +336,8 @@ class ContinuationCoordinator(ManagerComponent):
             # and delete files.
             if sid and not self._manager._sessions.resumable_sid(conv_key):
                 self._manager._sessions.seed_conversation(conv_key, sid, provider=provider, cwd=cwd)
+                # The scan read the run's persisted ledger beside its sid.
+                self._restore_image_ledger(conv_key, sid, rest[0] if rest else None)
             # Resumability gate: SessionMap.get self-prunes entries whose
             # session files are missing, so this also rejects RELEASED
             # conversations whose continuation runs still carry a stale
@@ -567,6 +595,9 @@ class ContinuationCoordinator(ManagerComponent):
                     provider=str(state.get("provider") or PROVIDER_LABEL_DEFAULT),
                     cwd=str(state.get("cwd") or ""),
                 )
+                # The run's ledger died with its handle; the record it left is
+                # what keeps the conversation's pictures counted from here.
+                self._restore_image_ledger(conv_key, sid, state.get("image_ledger"))
         # Re-check: SessionMap.get self-prunes entries whose session files
         # are missing, so a surviving mapping == resumable files on disk.
         if not self._manager._sessions.resumable_sid(conv_key):

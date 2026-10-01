@@ -177,7 +177,7 @@ from kiro_crew.agent_sdk.drivers.acp import EntitlementRevalidating  # noqa: F40
 from kiro_crew.config.paths import kiro_sessions_dir
 from kiro_crew.constants import COMPACT_WAIT_TIMEOUT_SECS
 from kiro_crew.executors import subprocess_executor
-from kiro_crew.image_ledger import SessionImageBudget, withheld_notice
+from kiro_crew.image_ledger import SessionImageBudget, compaction_refunds, withheld_notice
 from kiro_crew.metrics.events import CHILD_PERMISSION_DENIED, emit_counter
 from kiro_crew.platform.context import redact_log_via_context
 from kiro_crew.recovery.ladder import InfraError, classify_infra_error
@@ -1895,6 +1895,7 @@ class AcpSessionHandle:
         # failure this guard exists to prevent, just arriving by a different
         # exception hierarchy. Re-raised unchanged, so cancellation still
         # propagates.
+        _writing = False
         try:
             # Offer synchronously after the drain, before request building can yield
             # and queue a connected status that makes a reset unsafe. The consent link
@@ -1914,16 +1915,24 @@ class AcpSessionHandle:
             _mark = getattr(self._runtime, "mark_turn_active", None)
             if _mark is not None:
                 _mark(self._session_id, True)
+            _writing = True
             req_id = await self._runtime.send_request(_method, _params)
             self._prompt_written = True
-            # The prompt reached the runtime: the images it inlined are now
-            # part of the conversation, so their digests may be recorded.
-            # Before this point a died runtime makes the caller re-queue the
-            # same message, and a ledger charged at build time would then
-            # read the undelivered image as already sent.
+            # The prompt reached the runtime: its bytes are charged now, and the
+            # digests of the images it inlined are recorded once the runtime's
+            # first frame for this turn proves the prompt is in the conversation
+            # (``confirm`` in the dispatch loop). Before this point a died runtime
+            # makes the caller re-queue the same message, and a ledger charged at
+            # build time would then read the undelivered image as already sent.
             _withheld_images = self._image_budget.commit()
         except BaseException:
-            self._image_budget.discard()
+            # A write that raised may still have left its bytes with the runtime
+            # (a broken or cancelled drain), so it is charged as uncertain; a
+            # failure before the write charges nothing.
+            if _writing:
+                self._image_budget.abandon()
+            else:
+                self._image_budget.discard()
             self._turn_done.set()
             _mark = getattr(self._runtime, "mark_turn_active", None)
             if _mark is not None:
@@ -1965,7 +1974,12 @@ class AcpSessionHandle:
             if _withheld_images:
                 # Same position for the same reason: the user learns before the
                 # answer streams that the model never saw part of the message.
-                yield AcpEvent(kind=EVENT_IMAGE_BUDGET, text=withheld_notice(_withheld_images))
+                yield AcpEvent(
+                    kind=EVENT_IMAGE_BUDGET,
+                    text=withheld_notice(
+                        _withheld_images, refunds_on_compaction=self._compaction_refunds
+                    ),
+                )
             async for event in self._dispatch_events(
                 req_id, timeout, extract_command_result=extract_command_result
             ):
@@ -3323,8 +3337,12 @@ class AcpSessionHandle:
                             # loop, so it must drop the stale counts itself —
                             # mirrors AcpClient._handle_compaction_status.
                             self.last_prompt_stats.reset_after_compaction()
-                            # ...and refund the image ledger, for the same reason.
-                            self._image_budget.compacted()
+                            # ...and refund the image ledger for the same reason,
+                            # unless the frame is a co-tenant's fanned out to every
+                            # queue (their compaction left this replay intact) or the
+                            # process is a kiro-cli whose kept tail is unverified.
+                            if not msg.fanout_no_owner and self._compaction_refunds:
+                                self._image_budget.compacted()
                             poisoned = await self._drain_post_compaction_metadata(buffered=buffered)
                         # Redact backend-echoed summary before it reaches callers
                         # (compact() surfaces this to the dashboard).
@@ -3459,6 +3477,28 @@ class AcpSessionHandle:
         session: every handle on one runtime reports the same value.
         """
         return self._runtime.agent_version
+
+    def image_ledger_snapshot(self) -> dict[str, Any] | None:
+        """This session's inline-image ledger as it stands, or ``None`` when it counts nothing.
+
+        Read at teardown by an owner whose conversation has no durable record,
+        so the pictures the conversation holds stay counted when it is continued.
+        """
+        return self._image_budget.snapshot()
+
+    @property
+    def _compaction_refunds(self) -> bool:
+        """Whether this process's compaction refunds the image ledger.
+
+        Read at the withheld-image notice and at every compaction chokepoint,
+        so the user is promised exactly what the ledger will do. Per process,
+        like the version it is answered from: a resumed session on a newer
+        kiro-cli stops refunding, and its notice stops promising, together. A
+        runtime that exposes no version reads as unverified -- no refund.
+        """
+        return compaction_refunds(
+            self._runtime.acp_backend, getattr(self._runtime, "agent_version", "")
+        )
 
     @property
     def config_options(self) -> list[dict[str, Any]]:
@@ -4577,6 +4617,11 @@ class AcpSessionHandle:
                     # (a co-tenant's), and only the runtime knows which.
                     last_own_data_ts = last_data_ts
                     parked_at_own_data = parked_at_data
+                    # The same provenance is the earliest proof the written
+                    # prompt is in the conversation -- unless the frame is the
+                    # runtime refusing it, which proves the opposite.
+                    if not (msg.is_response_for(req_id) and msg.error):
+                        self._image_budget.confirm()
                 self.last_prompt_stats.event_count += 1
 
                 # Turn-complete response
@@ -4879,8 +4924,10 @@ class AcpSessionHandle:
                         self.last_prompt_stats.reset_after_compaction()
                         # The images in the summarized history left the replay
                         # with it: refund the ledger so the conversation can
-                        # inline images again under the same sid.
-                        self._image_budget.compacted()
+                        # inline images again under the same sid -- where the
+                        # process is a kiro-cli whose kept tail is verified.
+                        if self._compaction_refunds:
+                            self._image_budget.compacted()
                     # Compaction summary is backend-echoed text (LLM-influenced)
                     # that reaches the dashboard — redact exfil URLs/credentials
                     # before surfacing it (parity with other text surfaces).

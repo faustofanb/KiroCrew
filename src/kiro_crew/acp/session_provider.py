@@ -1189,6 +1189,10 @@ class AcpSessionProvider(LLMProvider):
         """The version the backing process runs — see :attr:`AcpSessionHandle.agent_version`."""
         return self._handle.agent_version
 
+    def image_ledger_snapshot(self) -> dict[str, Any] | None:
+        """The session's inline-image ledger — see :meth:`AcpSessionHandle.image_ledger_snapshot`."""
+        return self._handle.image_ledger_snapshot()
+
     @property
     def _session_id(self) -> str:
         """Session ID (AcpClient-compatible attribute)."""

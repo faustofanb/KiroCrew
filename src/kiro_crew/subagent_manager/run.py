@@ -368,6 +368,38 @@ class RunEventCoordinator(ManagerComponent):
         """Get agent info by ID."""
         return self._manager._agents.get(agent_id)
 
+    def _snapshot_image_ledger_impl(self, info: SubagentInfo, session_key: str) -> dict | None:
+        """The run's inline-image ledger, read from its live provider -- synchronous,
+        so a teardown can take it before the first await that may hang.
+
+        A run's conversation has no map entry until it is continued, so the ledger
+        lives on the provider's handle and would die with it. ``None`` when the
+        provider is gone or counts nothing.
+        """
+        provider = (
+            info._shared_provider
+            if info._session_sharing
+            else self._manager._sessions.get_provider(session_key)
+        )
+        snapshot = getattr(provider, "image_ledger_snapshot", None)
+        try:
+            ledger = snapshot() if callable(snapshot) else None
+        except Exception:
+            logger.debug("Subagent %s: image ledger snapshot failed", info.id, exc_info=True)
+            return None
+        return ledger if isinstance(ledger, dict) else None
+
+    async def _persist_image_ledger_impl(self, info: SubagentInfo, ledger: dict | None) -> None:
+        """Write a captured ledger into the run's ``state.json``, where a
+        continuation finds the sid it resumes under; nothing is written for
+        ``None``."""
+        if ledger is None:
+            return
+        try:
+            await self._manager._write_state_off_loop(info, "image ledger", image_ledger=ledger)
+        except Exception:
+            logger.debug("Subagent %s: image ledger persist failed", info.id, exc_info=True)
+
     async def _teardown_run_session_impl(self, info: SubagentInfo, session_key: str) -> None:
         """Release and reset the run's own session (skipped when reaped).
 
@@ -379,6 +411,18 @@ class RunEventCoordinator(ManagerComponent):
         and the teardown gate — leaking a concurrency slot, which is the very
         class of bug this module's guard split exists to prevent.
         """
+        # Taken before the provider is shut down or released -- the ledger lives
+        # on it -- synchronously, ahead of the first await; persisted at the end
+        # so a cancellation at that write cannot skip the release below. A reaped
+        # run's provider is already gone, and the reaper took the snapshot itself.
+        ledger = None if info.reaped else self._manager._snapshot_image_ledger(info, session_key)
+        try:
+            await self._manager._release_run_session(info, session_key)
+        finally:
+            await self._manager._persist_image_ledger(info, ledger)
+
+    async def _release_run_session_impl(self, info: SubagentInfo, session_key: str) -> None:
+        """The teardown's awaits: shut the shared handle or release the own session, then reset."""
         try:
             if info._session_sharing:
                 # Session-sharing subagents: destroy the session handle

@@ -6773,7 +6773,7 @@ class TestRunChatImageBudgetNotice:
             LLMEvent,
         )
 
-        notice = withheld_notice(2)
+        notice = withheld_notice(2, refunds_on_compaction=True)
         events = [
             LLMEvent(kind=EVENT_IMAGE_BUDGET, text=notice),
             LLMEvent(kind=EVENT_TEXT_CHUNK, text="the answer"),

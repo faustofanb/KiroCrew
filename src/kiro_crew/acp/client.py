@@ -265,7 +265,7 @@ from kiro_crew.hooks import (
     get_global_hook_store,
 )
 from kiro_crew.identity_stores import IDENTITY_STORE_ROOTS
-from kiro_crew.image_ledger import SessionImageBudget, withheld_notice
+from kiro_crew.image_ledger import SessionImageBudget, compaction_refunds, withheld_notice
 from kiro_crew.kiro_cli import known_kiro_cli_dirs, resolve_kiro_cli
 from kiro_crew.mcp_gateway.claim import (
     STUB_SESSION_TOKEN_ENV,
@@ -3816,6 +3816,24 @@ class AcpClient:
         The version this process RUNS — see :attr:`AcpRuntime.agent_version`.
         """
         return getattr(self, "_agent_version", "")
+
+    def image_ledger_snapshot(self) -> dict[str, Any] | None:
+        """This conversation's inline-image ledger as it stands, or ``None`` when it counts nothing.
+
+        Read at teardown by an owner whose conversation has no durable record,
+        so the pictures the conversation holds stay counted when it is continued.
+        """
+        return self._image_budget.snapshot()
+
+    @property
+    def _compaction_refunds(self) -> bool:
+        """Whether this process's compaction refunds the image ledger.
+
+        Read at the withheld-image notice and at the compaction chokepoint, so
+        the user is promised exactly what the ledger will do; answered from the
+        backend and the version this process reported at its handshake.
+        """
+        return compaction_refunds(self.backend, self.agent_version)
 
     @property
     def _judges_permission_requests(self) -> bool:
@@ -10620,6 +10638,13 @@ class AcpClient:
                 consecutive_empty = 0
                 last_data_ts = time.monotonic()
                 parked_at_data = parked_total
+                # The earliest proof the written prompt is in the conversation:
+                # kiro-cli speaking for this session, or answering the prompt
+                # with anything but a refusal of it.
+                if (msg.is_response_for(req_id) and not msg.error) or (
+                    isinstance(msg.params, dict) and msg.params.get("sessionId") == self._session_id
+                ):
+                    self._image_budget.confirm()
                 # NB: do NOT clear _tool_dispatched here.  The last_data_ts reset
                 # above already prevents false positives for tools that stream
                 # progress frames (each frame restarts the _TOOL_STALL_TIMEOUT
@@ -10829,7 +10854,12 @@ class AcpClient:
         if self._withheld_images:
             # Before the answer streams, as the shared-runtime handle does: the
             # user learns the model never saw part of the message.
-            yield AcpEvent(kind=EVENT_IMAGE_BUDGET, text=withheld_notice(self._withheld_images))
+            yield AcpEvent(
+                kind=EVENT_IMAGE_BUDGET,
+                text=withheld_notice(
+                    self._withheld_images, refunds_on_compaction=self._compaction_refunds
+                ),
+            )
         async for event in self._dispatch_events(req_id, timeout):
             yield event
 
@@ -11698,14 +11728,16 @@ class AcpClient:
                 {"sessionId": self._session_id, "prompt": blocks},
             )
         except BaseException:
-            # Never written, so nothing entered the conversation: a ledger
-            # charged now would drop the image from the caller's retry.
-            self._image_budget.discard()
+            # The write raised: its bytes may still have left with a broken or
+            # cancelled drain, so the prompt is charged as uncertain and no digest
+            # is recorded -- the caller's retry inlines the picture again.
+            self._image_budget.abandon()
             raise
-        # Records the staged ledger. A ``/clear`` sent as text is an ordinary
-        # prompt to the ledger (text-only, so nothing is staged and every digest
-        # stays); only the confirmed clear notification resets it, from the
-        # clear branch of ``_dispatch_events``.
+        # Charges the written prompt; its digests are recorded by ``confirm`` on
+        # the first frame kiro-cli sends for this session's turn. A ``/clear``
+        # sent as text is an ordinary prompt to the ledger (text-only, so nothing
+        # is staged and every digest stays); only the confirmed clear
+        # notification resets it, from the clear branch of ``_dispatch_events``.
         self._withheld_images = self._image_budget.commit()
         return req_id
 
@@ -13418,8 +13450,10 @@ class AcpClient:
             self._compaction_failed_at = None
             self.last_prompt_stats.reset_after_compaction()
             # The images in the summarized history left the replay with it:
-            # refund the ledger so the conversation can inline images again.
-            self._image_budget.compacted()
+            # refund the ledger so the conversation can inline images again --
+            # where the process is a kiro-cli whose kept tail is verified.
+            if self._compaction_refunds:
+                self._image_budget.compacted()
 
     def _claude_compaction_event(self, chunk: str) -> AcpEvent | None:
         """Reclassify a claude-agent-acp compaction notice chunk as an event.

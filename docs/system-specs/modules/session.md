@@ -2476,9 +2476,9 @@ restart and is pruned with the entry. Three rules shape it:
   a clear that did happen costs a `sent earlier` marker that names the file. A
   harness shown to clear on the text can be admitted later by an opt-in
   membership (H6 in `harness-parity.md`) carrying the measurement.
-- **Refunded on a kiro-cli compaction.** A compaction keeps the same `sid`, so
-  neither the sid scoping nor the clear reset fires, yet it turns the older
-  history -- and every image in it -- into summary text; only the newest
+- **Refunded on a verified kiro-cli's compaction.** A compaction keeps the same
+  `sid`, so neither the sid scoping nor the clear reset fires, yet it turns the
+  older history -- and every image in it -- into summary text; only the newest
   user/assistant pairs stay verbatim (at least two, plus as many more as it
   takes, walked newest-first, to reach two percent of the context window in
   raw bytes with images at full weight) and the prompt in flight is re-sent.
@@ -2491,21 +2491,49 @@ restart and is pruned with the entry. Three rules shape it:
   ledger knows which prompts those can be from the per-prompt records it keeps
   under `recent` (each image prompt's inlined bytes, the prompt text written
   after it, and its position from the newest prompt, saturating one past the
-  kept pairs); a record is dropped as soon as no compaction could keep it. The
+  kept pairs); a record is dropped as soon as no compaction could keep it, a
+  prompt's text reaches the older records only at the next write (held as
+  `pending_text` meanwhile, because kiro-cli's walk skips the prompt still in
+  flight), and past the record cap the oldest surviving record carries the
+  bytes of the ones cut, refunded with it and never before their image left
+  the replay. The
   walk sees only what this side wrote -- never the assistant's replies or tool
   results -- and is sized for the largest window served, so it can only keep a
   prompt kiro-cli summarized, never drop one it kept: the total errs toward
-  staying charged, and the wire stays under the ceiling. Only kiro-cli's
-  compaction refunds: its kept tail is measured; a refund against an
-  unmeasured tail (KAS, claude-agent-acp, codex) could re-open the growth, so
-  those conversations keep the pre-refund behaviour and `/new` starts a fresh
-  ledger.
-- **Charged by the write, not the build.** The prompt path stages the
-  recomputed ledger while it builds the blocks and writes it here only after
-  the `session/prompt` frame has been written; a write that raises discards the
-  stage, so a message the caller re-queues after a runtime death still carries
-  its image instead of a `sent earlier` marker for a picture the conversation
-  never received.
+  staying charged, and the wire stays under the ceiling. The refund is released
+  only where `image_ledger.compaction_refunds` holds: membership in
+  `ACP_BACKENDS_IMAGE_LEDGER_REFUND` (harness-parity H6; kiro-cli alone today)
+  AND a version the process reported at `initialize` that the mirrored tail
+  was read for -- a stable or nightly build from 2.17.0 through 2.24.1, that
+  release's nightlies up to `-nightly.2` (`COMPACTION_VERIFIED_KIRO_CLI_RELEASES`,
+  `COMPACTION_VERIFIED_KIRO_CLI_LAST_NIGHTLY`). A newer release or nightly, an
+  rc or feature build, a source build (`0.0.0-dev`), a process that has not
+  reported, and every other backend (KAS, claude-agent-acp, codex) keep the
+  ledger across a compaction: an unverified tail refunded could re-open the
+  growth, so those conversations only ever charge, which costs them their
+  allowance and never the wire ceiling, and `/new` starts a fresh ledger. The
+  same decision drives the user's withheld-image notice, so a refund is
+  promised exactly where one happens.
+- **Charged by the write, known by the first frame.** The prompt path stages
+  the recomputed ledger while it builds the blocks and writes it here right
+  after the `session/prompt` frame has been written, with the prompt's bytes
+  charged at once and its digests and record advance held as `unconfirmed`
+  until the runtime's first frame for the turn proves the prompt is in the
+  conversation. A prompt still unconfirmed when the next one is written -- the
+  runtime died first -- is read as uncertain: its bytes move to
+  `uncertain_bytes` and stay charged (no compaction refunds them), its digests
+  and advance are dropped, so a message the caller re-queues after a runtime
+  death still carries its image instead of a `sent earlier` marker for a
+  picture the conversation may never have received, and the retention walk
+  never runs ahead of the replay. A write that raised once it began is charged
+  the same way; one that failed before it began charges nothing. A transferred
+  context window arrives with its ledger (Layer B's `image_ledger`), stored
+  under the rewritten sid; one from a sender that carried no ledger counts
+  from zero, which the importer logs rather than guesses. A subagent run's
+  conversation gains its entry only when continued, so the run persists its
+  ledger into its `state.json` at teardown (and the reaper does for a run it
+  tears down) and the continuation stores it under the seeded sid, refusing
+  one that names another conversation.
 - **Never materializes an entry.** `set_image_ledger` writes only onto an
   existing entry and returns `False` otherwise; `get_image_ledger` returns
   `None` for a key with no entry. That `None` is what tells the prompt path a

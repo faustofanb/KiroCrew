@@ -301,6 +301,25 @@ def test_mcp_config_hot_reload_is_opt_in() -> None:
     assert ACP_BACKEND_CLAUDE not in ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD
 
 
+def test_image_ledger_refund_is_opt_in() -> None:
+    """H6: a compaction refunding the inline-image ledger is claimed by membership.
+
+    The gate must read the set, then the process's version — a harness that
+    merely reports a compaction frame must not inherit the refund, because a
+    refund against an unmeasured kept tail re-opens the request-body growth the
+    ledger exists to stop. Only kiro-cli's kept tail has been read.
+    """
+    from kiro_crew import image_ledger
+    from kiro_crew.acp_backends import ACP_BACKENDS_IMAGE_LEDGER_REFUND
+
+    source = inspect.getsource(image_ledger.compaction_refunds)
+    assert "ACP_BACKENDS_IMAGE_LEDGER_REFUND" in source
+    assert "kiro_cli_compaction_verified" in source
+    assert ACP_BACKENDS_IMAGE_LEDGER_REFUND == frozenset({ACP_BACKEND_KIRO})
+    assert ACP_BACKEND_KAS not in ACP_BACKENDS_IMAGE_LEDGER_REFUND
+    assert ACP_BACKEND_CLAUDE not in ACP_BACKENDS_IMAGE_LEDGER_REFUND
+
+
 def test_steer_capability_declares_its_stamp() -> None:
     """H15: a provider that can steer must also report WHEN it steered.
 

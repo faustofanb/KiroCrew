@@ -1569,7 +1569,13 @@ fidelity a local gateway restart gives.
 So `bundle_version` 2 carries an optional `layer_b`. It is **optional by
 design**: a v1 sender, or a session that never opened a kiro-cli context, ships
 Layer A only and the peer degrades to the prefix. Both versions stay accepted so
-a newer instance can still receive from an older one.
+a newer instance can still receive from an older one. Layer B also carries the
+conversation's inline-image ledger (`layer_b.image_ledger`, the session spec's
+[inline-image ledger](session.md#inline-image-ledger-on-the-entry)), because the
+pictures the context window holds must stay deduplicated and budgeted on
+arrival; the importer stores it under the rewritten `sid`. A bundle without the
+key comes from a sender that carried no ledger: the peer counts from zero and
+logs that it did, since what that window holds is unknowable to it.
 
 On import Layer B's **host-naming fields** are rewritten — a fresh `sid`
 (so copy-never-move holds and a repeat send cannot collide), `cwd` and the

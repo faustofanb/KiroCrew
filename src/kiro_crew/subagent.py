@@ -5120,7 +5120,7 @@ class SubagentManager:
     ) -> None:
         return self._continuation._promote_conversation_impl(conv_id, conv_key, last_used)
 
-    def _scan_keep_states(self) -> list[tuple[str, str, str, str, str, float]]:
+    def _scan_keep_states(self) -> list[tuple[str, str, str, str, str, float, object]]:
         return self._continuation._scan_keep_states_impl()
 
     async def _rebuild_conversation_registry(self) -> None:
@@ -5402,6 +5402,15 @@ class SubagentManager:
 
     async def _teardown_run_session(self, info: SubagentInfo, session_key: str) -> None:
         return await self._run_events._teardown_run_session_impl(info, session_key)
+
+    async def _release_run_session(self, info: SubagentInfo, session_key: str) -> None:
+        return await self._run_events._release_run_session_impl(info, session_key)
+
+    def _snapshot_image_ledger(self, info: SubagentInfo, session_key: str) -> dict | None:
+        return self._run_events._snapshot_image_ledger_impl(info, session_key)
+
+    async def _persist_image_ledger(self, info: SubagentInfo, ledger: dict | None) -> None:
+        return await self._run_events._persist_image_ledger_impl(info, ledger)
 
     async def _run(self, info: SubagentInfo) -> None:
         return await self._run_events._run_impl(info)

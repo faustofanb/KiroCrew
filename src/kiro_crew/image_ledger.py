@@ -28,16 +28,20 @@ describes (the ACP session id, ``sid``, its images were inlined into), and a
 prompt on a different sid reads it as empty, because a new native conversation
 (``/new``, a discarded conversation, a provider switch, a fresh session whose sid
 promotion is deferred behind a history replay) carries none of the old images; a
-confirmed native clear empties it; and a kiro-cli compaction REFUNDS it, because
+confirmed native clear empties it; and a compaction REFUNDS it when the backend
+is a kiro-cli whose kept tail is verified (:func:`compaction_refunds`), because
 a compaction summarizes the older history into text and the images in that
 history leave the replay -- only the newest prompts stay verbatim, so only their
-bytes stay charged (:func:`compact_ledger`). A session with no durable record (a
-stateless cron or subagent session, the direct client) keeps an in-memory ledger
-for the life of its handle.
+bytes stay charged (:func:`compact_ledger`); a compaction by any other backend,
+or by a kiro-cli build the range does not cover, leaves the ledger as it is. A
+session with no durable record (a stateless cron or subagent session, the direct
+client) keeps an in-memory ledger for the life of its handle.
 
 A LEAF module, like :mod:`kiro_crew.imaging`: it imports nothing from
 ``kiro_crew.acp`` (which imports it) and nothing from ``kiro_crew.session_map``
-(which implements :class:`ImageLedgerStore`), so both sides can import it.
+(which implements :class:`ImageLedgerStore`), so both sides can import it; the
+membership set it reads comes from the leaf
+:mod:`kiro_crew.agent_sdk.backends`.
 """
 
 from __future__ import annotations
@@ -49,6 +53,8 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeGuard
+
+from kiro_crew.agent_sdk.backends import ACP_BACKENDS_IMAGE_LEDGER_REFUND
 
 logger = logging.getLogger(__name__)
 
@@ -89,13 +95,13 @@ MAX_PROMPT_IMAGE_BLOCKS = 20
 #: at most 16 KiB on the session record.
 MAX_LEDGER_HASHES = 256
 
-#: What a kiro-cli compaction leaves in the replay. It summarizes the history
-#: into text except for the newest user/assistant PAIRS -- at least this many,
-#: and as many more as it takes, walked newest-first, to reach two percent of the
-#: context window measured in raw bytes with an image at its full byte weight --
-#: and then re-sends the prompt that was in flight. A prompt within this many
-#: positions of the newest one is kept whatever its size; an older one is kept
-#: only while the walk has not yet reached its target.
+#: What a kiro-cli compaction leaves in the replay, read from its source at revision
+#: 0f73dec10 (crates/agent/src/agent/compact/mod.rs: pairs 2, percent 2): the history
+#: becomes text except the newest user/assistant PAIRS -- at least this many, and as
+#: many more as it takes, walked newest-first, to reach two percent of the context
+#: window in raw bytes with an image at its full byte weight -- then the prompt in
+#: flight is re-sent. A prompt within this many positions of the newest is kept
+#: whatever its size; an older one only while the walk has not yet reached its target.
 COMPACTION_KEPT_PAIRS = 2
 
 #: The walk's target in raw bytes, sized for the largest context window served
@@ -107,10 +113,40 @@ COMPACTION_KEPT_PAIRS = 2
 #: kiro-cli's own walk.
 COMPACTION_WALK_TARGET_BYTES = 1_000_000 * 2 // 100 * 4
 
+#: The kiro-cli releases the two constants above are verified for, both ends
+#: inclusive: ``crates/agent/src/agent/compact/mod.rs`` is byte-identical at every
+#: release tag from v2.17.0 through v2.24.1 (stable, nightly, rc and feature
+#: builds alike) and on every main commit from the first of those nightlies to
+#: revision 0f73dec10, and every compaction the ACP agent starts in that span
+#: uses the default or the aggressive strategy, which keep the same tail. A build
+#: outside the range, or one that reports no version, keeps the ledger across a
+#: compaction: the budget then only ever charges, which costs a conversation its
+#: allowance, never the wire ceiling. Moving the ceiling means re-reading that
+#: module at the new tag.
+COMPACTION_VERIFIED_KIRO_CLI_RELEASES: tuple[tuple[int, int, int], tuple[int, int, int]] = (
+    (2, 17, 0),
+    (2, 24, 1),
+)
+
+#: Nightlies are built from main and numbered within the release they precede
+#: (``2.24.1-nightly.2`` ships before ``2.24.1``), so the ceiling release's
+#: nightlies are verified only up to the one that predates revision 0f73dec10;
+#: a later ``2.24.1-nightly.N`` is a later main, which the range cannot vouch for.
+COMPACTION_VERIFIED_KIRO_CLI_LAST_NIGHTLY = 2
+
+#: The two version shapes a released kiro-cli reports at ``initialize`` that the
+#: range can place: a stable ``X.Y.Z`` and a nightly ``X.Y.Z-nightly.N``. An rc or
+#: feature build (``2.24.1-rc.1``, ``2.23.1-autocomplete-decouple.3``) is cut from
+#: a branch the range says nothing about, and a source build reports
+#: ``0.0.0-dev``; none of those parse, so none refund. Matched whole, suffix
+#: included: a read of the leading triple alone would admit every later
+#: ``2.24.1-nightly.N``.
+_KIRO_CLI_RELEASE_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-nightly\.(\d+))?")
+
 #: Bound on the per-prompt records a ledger keeps for the walk. A record is
 #: dropped once no compaction could keep its prompt, so the list only grows past
-#: a handful when consecutive prompts inline images too small to reach the
-#: target between them; past this many the oldest is treated as summarized.
+#: a handful when consecutive prompts inline images too small to reach the target
+#: between them; past this many the oldest survivor carries the cut records' bytes.
 MAX_RECENT_PROMPTS = 32
 
 #: The only shape a retained digest may have: the lowercase hex SHA-256 that
@@ -167,7 +203,15 @@ def set_image_ledger_store(store: ImageLedgerStore | None) -> None:
 
 def empty_ledger(sid: str = "") -> dict[str, Any]:
     """A ledger for native conversation *sid* that has inlined nothing."""
-    return {"sid": sid, "hashes": [], "b64_bytes": 0, "recent": []}
+    return {
+        "sid": sid,
+        "hashes": [],
+        "b64_bytes": 0,
+        "recent": [],
+        "pending_text": 0,
+        "uncertain_bytes": 0,
+        "unconfirmed": None,
+    }
 
 
 def _normalize_recent(raw: object) -> list[dict[str, int]]:
@@ -239,11 +283,104 @@ def normalize_ledger(raw: object) -> dict[str, Any]:
     b64_raw = raw.get("b64_bytes")
     b64_bytes = b64_raw if isinstance(b64_raw, int) and not isinstance(b64_raw, bool) else 0
     sid_raw = raw.get("sid")
+    pending_raw = raw.get("pending_text")
+    uncertain_raw = raw.get("uncertain_bytes")
     return {
         "sid": sid_raw if isinstance(sid_raw, str) else "",
         "hashes": hashes,
         "b64_bytes": max(0, b64_bytes),
         "recent": _normalize_recent(raw.get("recent")),
+        "pending_text": (
+            min(pending_raw, COMPACTION_WALK_TARGET_BYTES) if _is_count(pending_raw) else 0
+        ),
+        "uncertain_bytes": uncertain_raw if _is_count(uncertain_raw) else 0,
+        "unconfirmed": _normalize_unconfirmed(raw.get("unconfirmed")),
+    }
+
+
+def _normalize_unconfirmed(raw: object) -> dict[str, Any] | None:
+    """The delta of a written-but-unaccepted prompt, or ``None`` when there is none.
+
+    ``hashes`` are the digests that prompt added, ``recent`` and ``pending_text``
+    the records as they stand once it counts, ``b`` the bytes it inlined. A
+    malformed delta reads as none: the bytes it would have moved to
+    ``uncertain_bytes`` are already in ``b64_bytes``, so nothing is lost but the
+    digests, which only ever cost a re-inline.
+    """
+    if not isinstance(raw, dict):
+        return None
+    hashes_raw, b, pending = raw.get("hashes"), raw.get("b"), raw.get("pending_text")
+    if not isinstance(hashes_raw, list) or not _is_count(b) or not _is_count(pending):
+        return None
+    hashes = [
+        h for h in hashes_raw[-MAX_LEDGER_HASHES:] if isinstance(h, str) and _DIGEST_RE.fullmatch(h)
+    ]
+    return {
+        "hashes": hashes,
+        "recent": _normalize_recent(raw.get("recent")),
+        "pending_text": min(pending, COMPACTION_WALK_TARGET_BYTES),
+        "b": b,
+    }
+
+
+def stage_written(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """*before* with the prompt WRITTEN but not yet accepted, *after* being the
+    ledger once it is.
+
+    The bytes are charged at once -- ``b64_bytes`` is *after*'s -- because an
+    over-charge only costs allowance, while an under-charge is the wire growth
+    this layer exists to stop. The digests and the record advance wait in
+    ``unconfirmed``: a digest recorded for a prompt the backend never stored
+    would mark the re-queued retry's picture ``sent earlier`` and the model
+    would never see it, and a record advance for it would walk the retention
+    one position ahead of the replay.
+    """
+    known = set(before["hashes"])
+    return {
+        **before,
+        "b64_bytes": after["b64_bytes"],
+        "unconfirmed": {
+            "hashes": [h for h in after["hashes"] if h not in known],
+            "recent": after["recent"],
+            "pending_text": after["pending_text"],
+            "b": max(0, after["b64_bytes"] - before["b64_bytes"]),
+        },
+    }
+
+
+def confirm_ledger(ledger: dict[str, Any] | None) -> dict[str, Any]:
+    """*ledger* with its unconfirmed prompt accepted: digests known, records advanced."""
+    state = normalize_ledger(ledger)
+    delta = state["unconfirmed"]
+    if delta is None:
+        return state
+    return {
+        **state,
+        "hashes": (state["hashes"] + delta["hashes"])[-MAX_LEDGER_HASHES:],
+        "recent": delta["recent"],
+        "pending_text": delta["pending_text"],
+        "unconfirmed": None,
+    }
+
+
+def invalidate_ledger(ledger: dict[str, Any] | None) -> dict[str, Any]:
+    """*ledger* with its unconfirmed prompt treated as never stored.
+
+    Its digests are dropped, so the re-queued retry inlines the picture again;
+    its record advance is dropped, so the retention walk stays at the replay's
+    positions (one position newer than reality if the backend did store it,
+    which keeps a record longer -- the safe side); its bytes move to
+    ``uncertain_bytes``, charged for the life of the conversation, because
+    whether the replay carries them is exactly what is unknown.
+    """
+    state = normalize_ledger(ledger)
+    delta = state["unconfirmed"]
+    if delta is None:
+        return state
+    return {
+        **state,
+        "uncertain_bytes": state["uncertain_bytes"] + delta["b"],
+        "unconfirmed": None,
     }
 
 
@@ -275,29 +412,48 @@ def _kept_by_compaction(recent: list[dict[str, int]]) -> list[dict[str, int]]:
 
 
 def _advance_recent(
-    recent: list[dict[str, int]], inlined_b64_bytes: int, text_bytes: int
-) -> list[dict[str, int]]:
-    """*recent* after one more prompt is written: *text_bytes* of text, and
-    *inlined_b64_bytes* of images.
+    recent: list[dict[str, int]], inlined_b64_bytes: int, text_bytes: int, pending_text: int
+) -> tuple[list[dict[str, int]], int]:
+    """``(recent, pending_text)`` after one more prompt is written: *text_bytes*
+    of text, and *inlined_b64_bytes* of images.
 
     Every earlier record moves one position further from the newest prompt (its
     position saturates one past :data:`COMPACTION_KEPT_PAIRS`, beyond which only
-    the walk can keep it) and gains the prompt's text; the prompt gains a record
-    when it inlined anything; and records no compaction could keep are dropped
-    now rather than carried: later prompts only push a record further out and
-    add bytes ahead of it, so a record dropped today would never be kept.
+    the walk can keep it); the prompt gains a record when it inlined anything;
+    and records no compaction could keep are dropped now rather than carried:
+    later prompts only push a record further out and add bytes ahead of it, so a
+    record dropped today would never be kept.
+
+    A prompt's text is charged to the records older than it only at the NEXT
+    write, as *pending_text*, never at its own: kiro-cli's walk skips the
+    trailing user message -- the prompt whose overflow triggered the compaction
+    is kept, not counted -- so counting it at its own write would reach the
+    target early and refund a picture the replay still carries. The record of
+    the prompt that owes the text gains nothing from it: what was written after
+    THAT prompt is this one, itself owed. Nothing is owed while no record could
+    read it, so a conversation without image prompts never changes its ledger.
     """
     aged = [
         {
             "b": e["b"],
-            "t": min(e["t"] + text_bytes, COMPACTION_WALK_TARGET_BYTES),
+            "t": min(
+                e["t"] + (pending_text if e["after"] > 0 else 0), COMPACTION_WALK_TARGET_BYTES
+            ),
             "after": min(e["after"] + 1, COMPACTION_KEPT_PAIRS + 1),
         }
         for e in recent
     ]
     if inlined_b64_bytes > 0:
         aged.append({"b": inlined_b64_bytes, "t": 0, "after": 0})
-    return _kept_by_compaction(aged)[-MAX_RECENT_PROMPTS:]
+    kept = _kept_by_compaction(aged)
+    if len(kept) > MAX_RECENT_PROMPTS:
+        # The cap bounds the list, not the accounting: records it cuts are
+        # older than the oldest survivor, so their bytes ride on it and are
+        # refunded when it is -- never before their image left the replay.
+        folded = sum(e["b"] for e in kept[:-MAX_RECENT_PROMPTS])
+        kept = kept[-MAX_RECENT_PROMPTS:]
+        kept[0] = {**kept[0], "b": kept[0]["b"] + folded}
+    return kept, (min(text_bytes, COMPACTION_WALK_TARGET_BYTES) if kept else 0)
 
 
 def compact_ledger(ledger: dict[str, Any] | None) -> dict[str, Any]:
@@ -308,15 +464,64 @@ def compact_ledger(ledger: dict[str, Any] | None) -> dict[str, Any]:
     than needed for one the kept tail still carries -- and the byte total drops
     to what the kept prompts inlined, the bytes the replay can still carry. The
     per-prompt records themselves stay: they are what the NEXT compaction reads.
+    So does the text still owed by the prompt in flight: kiro-cli kept that
+    prompt without counting it, and it is charged once answered. A prompt still
+    unconfirmed counts first -- the compaction frame is the backend speaking
+    about a conversation that holds it -- and ``uncertain_bytes`` stay charged:
+    whether the replay carries them is what no compaction can tell.
     """
-    state = normalize_ledger(ledger)
+    state = confirm_ledger(ledger)
     kept = _kept_by_compaction(state["recent"])
     return {
         "sid": state["sid"],
         "hashes": [],
-        "b64_bytes": sum(e["b"] for e in kept),
+        "b64_bytes": sum(e["b"] for e in kept) + state["uncertain_bytes"],
         "recent": kept,
+        "pending_text": state["pending_text"] if kept else 0,
+        "uncertain_bytes": state["uncertain_bytes"],
+        "unconfirmed": None,
     }
+
+
+def kiro_cli_compaction_verified(agent_version: str) -> bool:
+    """Whether a kiro-cli reporting *agent_version* at ``initialize`` keeps the
+    compaction tail :func:`compact_ledger` mirrors.
+
+    True only for a stable or nightly build inside
+    :data:`COMPACTION_VERIFIED_KIRO_CLI_RELEASES`, the ceiling release's
+    nightlies up to :data:`COMPACTION_VERIFIED_KIRO_CLI_LAST_NIGHTLY`. Anything
+    else -- a newer release, a later nightly, an rc or feature build, a source
+    build, an empty or malformed string -- is unverified, and unverified reads as
+    False: the cost of a wrong True is a refund for images the backend still
+    replays, the growth the budget exists to stop.
+    """
+    match = _KIRO_CLI_RELEASE_RE.fullmatch(agent_version.strip())
+    if match is None:
+        return False
+    release = (int(match[1]), int(match[2]), int(match[3]))
+    floor, ceiling = COMPACTION_VERIFIED_KIRO_CLI_RELEASES
+    if not floor <= release <= ceiling:
+        return False
+    nightly = match[4]
+    if nightly is not None and release == ceiling:
+        return int(nightly) <= COMPACTION_VERIFIED_KIRO_CLI_LAST_NIGHTLY
+    return True
+
+
+def compaction_refunds(backend: str, agent_version: str) -> bool:
+    """Whether a compaction on this conversation refunds its ledger.
+
+    The ONE decision both the compaction paths and the user's withheld-image
+    notice read, so the ledger is never refunded where the notice promised
+    nothing, nor promised a refund that never comes. Membership first
+    (:data:`ACP_BACKENDS_IMAGE_LEDGER_REFUND`: the harnesses whose compaction
+    kept tail has been read -- a capability is opted into, never inferred from a
+    frame), then the version the process reported, since only a verified build
+    keeps the tail the refund assumes.
+    """
+    return backend in ACP_BACKENDS_IMAGE_LEDGER_REFUND and kiro_cli_compaction_verified(
+        agent_version
+    )
 
 
 def load_image_ledger(session_key: str, session_id: str) -> dict[str, Any] | None:
@@ -434,11 +639,14 @@ def apply_image_budget(
     without any ``_``-prefixed key, and non-image blocks pass through unchanged
     except for the text rewritten for a degraded image.
     """
-    state = normalize_ledger(ledger)
+    state = invalidate_ledger(ledger)
     if not has_image_blocks(blocks):
+        recent, pending_text = _advance_recent(
+            state["recent"], 0, _text_bytes(blocks), state["pending_text"]
+        )
         return ImageBudgetResult(
             blocks=blocks,
-            ledger={**state, "recent": _advance_recent(state["recent"], 0, _text_bytes(blocks))},
+            ledger={**state, "recent": recent, "pending_text": pending_text},
             inlined=0,
             sent_earlier=0,
             over_budget=0,
@@ -485,13 +693,19 @@ def apply_image_budget(
     if degraded:
         out = _rewrite_markers(out, degraded)
     evicted = max(0, len(hashes) - MAX_LEDGER_HASHES)
+    recent, pending_text = _advance_recent(
+        state["recent"], prompt_bytes, _text_bytes(out), state["pending_text"]
+    )
     return ImageBudgetResult(
         blocks=out,
         ledger={
             "sid": state["sid"],
             "hashes": hashes[-MAX_LEDGER_HASHES:],
             "b64_bytes": session_bytes,
-            "recent": _advance_recent(state["recent"], prompt_bytes, _text_bytes(out)),
+            "recent": recent,
+            "pending_text": pending_text,
+            "uncertain_bytes": state["uncertain_bytes"],
+            "unconfirmed": None,
         },
         inlined=inlined,
         sent_earlier=sent_earlier,
@@ -556,20 +770,24 @@ def _rewrite_markers(
     return out
 
 
-def withheld_notice(over_budget: int) -> str:
+def withheld_notice(over_budget: int, *, refunds_on_compaction: bool) -> str:
     """The sentence a surface shows its user for *over_budget* images kept off the wire.
 
     The prompt path yields it as an event once the prompt is written; the
     dashboard appends it as a notice row. It names counts and caps only, never
     a file, a path or the picture itself, so it can be shown on any surface.
+    *refunds_on_compaction* is :func:`compaction_refunds` for this conversation
+    -- the same answer its compaction paths act on -- so the user is promised
+    only what will happen.
     """
     count = "One image was" if over_budget == 1 else f"{over_budget} images were"
+    refund = ", refunded when the conversation is compacted" if refunds_on_compaction else ""
     return (
         f"\u26a0\ufe0f {count} not sent to the model: over the image budget "
         f"({MAX_PROMPT_IMAGE_BLOCKS} images or {MAX_PROMPT_IMAGE_B64_BYTES // (1024 * 1024)} MiB "
-        f"per message, {MAX_SESSION_IMAGE_B64_BYTES // (1024 * 1024)} MiB per conversation, "
-        "refunded when the conversation is compacted). The file path stayed in the "
-        "message for an agent with file tools; /new starts a conversation with a fresh budget."
+        f"per message, {MAX_SESSION_IMAGE_B64_BYTES // (1024 * 1024)} MiB per conversation"
+        f"{refund}). The file path stayed in the message for an agent with file tools; "
+        "/new starts a conversation with a fresh budget."
     )
 
 
@@ -596,33 +814,49 @@ class SessionImageBudget:
         self._session_key = session_key
         self._session_id = session_id
         self._local: dict[str, Any] = empty_ledger()
-        # ``(session key, ledger is durable, ledger)`` staged by ``apply`` for the
-        # prompt being built; ``None`` when nothing is owed.
-        self._pending: tuple[str, bool, dict[str, Any]] | None = None
+        # ``(session key, ledger is durable, ledger as written, ledger once
+        # accepted)`` staged by ``apply`` for the prompt being built; ``None``
+        # when nothing is owed.
+        self._pending: tuple[str, bool, dict[str, Any], dict[str, Any]] | None = None
+        # ``(session key, ledger is durable, ledger once accepted)`` recorded by
+        # ``commit`` and owed to ``confirm``; ``None`` when nothing is written
+        # and unaccepted.
+        self._awaiting: tuple[str, bool, dict[str, Any]] | None = None
         # Image blocks the staged prompt kept off the wire as over the budget;
         # what ``commit`` hands back so the owner can tell its user.
         self._pending_withheld = 0
 
     def _current(self) -> tuple[str, bool, dict[str, Any]]:
-        """``(session key, ledger is durable, ledger)`` for this owner's conversation now."""
+        """``(session key, ledger is durable, ledger)`` for this owner's conversation now.
+
+        A ledger still carrying an unconfirmed prompt here means that prompt's
+        turn ended without the backend ever speaking for it -- the runtime died,
+        or the write raised -- and the caller is now writing the next one, so it
+        is invalidated: bytes kept charged, digests and advance dropped.
+        """
         key = self._session_key() or ""
         sid = self._session_id() or ""
+        self._awaiting = None
         durable = load_image_ledger(key, sid)
         if durable is not None:
+            if durable["unconfirmed"] is not None:
+                durable = invalidate_ledger(durable)
+                self._record(key, True, durable)
             return key, True, durable
         if self._local["sid"] != sid:
             # The in-memory ledger describes the conversation it was built in;
             # a new native conversation on this owner starts from nothing.
             self._local = empty_ledger(sid)
+        elif self._local["unconfirmed"] is not None:
+            self._local = invalidate_ledger(self._local)
         return key, False, self._local
 
     def _record(self, key: str, durable: bool, ledger: dict[str, Any]) -> None:
-        if durable:
-            # SessionMap's on-loop mutation marks the map dirty and defers the
-            # file write to its worker thread (its own threading contract);
-            # nothing here waits on disk.
-            store_image_ledger(key, ledger)
-        else:
+        # SessionMap's on-loop mutation marks the map dirty and defers the file
+        # write to its worker thread (its own threading contract); nothing here
+        # waits on disk. A durable record that refuses the write (its entry is
+        # gone) keeps the ledger here rather than losing the charge.
+        if not (durable and store_image_ledger(key, ledger)):
             self._local = ledger
 
     async def apply(self, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -643,7 +877,7 @@ class SessionImageBudget:
         else:
             result = await asyncio.to_thread(apply_image_budget, blocks, ledger)
         if result.ledger != ledger:
-            self._pending = (key, durable, result.ledger)
+            self._pending = (key, durable, stage_written(ledger, result.ledger), result.ledger)
         self._pending_withheld = result.over_budget
         if result.sent_earlier or result.over_budget or result.evicted:
             # Content-free counts only, like the structure summary logged
@@ -659,7 +893,7 @@ class SessionImageBudget:
         return result.blocks
 
     def commit(self) -> int:
-        """Record the staged ledger: the prompt it describes reached the runtime.
+        """Record the written prompt: its bytes charged now, the rest owed to ``confirm``.
 
         Called right after the ``session/prompt`` write succeeds. Returns how
         many of that prompt's image blocks were kept off the wire as over the
@@ -669,13 +903,58 @@ class SessionImageBudget:
         pending, self._pending = self._pending, None
         withheld, self._pending_withheld = self._pending_withheld, 0
         if pending is not None:
-            self._record(*pending)
+            key, durable, written, accepted = pending
+            self._record(key, durable, written)
+            self._awaiting = (key, durable, accepted)
         return withheld
+
+    def confirm(self) -> None:
+        """Record the written prompt as accepted: digests known, records advanced.
+
+        Called on the first frame the backend sends for this session's turn -- a
+        notification it routed here, or its answer to the prompt -- which is the
+        earliest proof the prompt is in the conversation. Idempotent: a turn
+        yields many frames and only the first one does the work.
+        """
+        awaiting, self._awaiting = self._awaiting, None
+        if awaiting is not None:
+            self._record(*awaiting)
 
     def discard(self) -> None:
         """Drop the staged ledger: the prompt it describes was never written."""
         self._pending = None
         self._pending_withheld = 0
+
+    def snapshot(self) -> dict[str, Any] | None:
+        """This owner's ledger, for a record that outlives the owner.
+
+        A run's conversation has no durable record of its own until it is
+        continued, so its ledger lives on the handle and would die with it; the
+        run persists this at teardown and the continuation stores it under the
+        seeded entry. A prompt still unconfirmed is read as uncertain -- the owner
+        is going away, so no frame will ever confirm it. ``None`` when there is
+        nothing to carry: no conversation, or a ledger that counts nothing.
+        """
+        if not (self._session_id() or ""):
+            return None
+        _key, _durable, ledger = self._current()
+        if not ledger["hashes"] and not ledger["b64_bytes"] and not ledger["recent"]:
+            return None
+        return ledger
+
+    def abandon(self) -> None:
+        """Charge the staged prompt as uncertain: its write raised after its bytes may have left.
+
+        A drain that breaks or is cancelled can leave the frame with the
+        backend, which then stores a prompt this side cannot account for, so the
+        bytes stay charged while the digests and the advance are dropped -- the
+        same reading an unconfirmed prompt gets on recovery.
+        """
+        pending, self._pending = self._pending, None
+        self._pending_withheld = 0
+        if pending is not None:
+            key, durable, written, _accepted = pending
+            self._record(key, durable, invalidate_ledger(written))
 
     def reset(self) -> None:
         """Forget every inlined image: the native conversation was emptied.
@@ -688,6 +967,7 @@ class SessionImageBudget:
         """
         self._pending = None
         self._pending_withheld = 0
+        self._awaiting = None
         key, durable, _ledger = self._current()
         sid = self._session_id() or ""
         self._local = empty_ledger(sid)
@@ -702,9 +982,13 @@ class SessionImageBudget:
         reset fires, yet the older history -- and every image in it -- has just
         become summary text. :func:`compact_ledger` forgets the digests and keeps
         charged only the bytes of the prompts the kept tail can still replay, so
-        a conversation that had reached its budget can inline images again. Only
-        kiro-cli's compaction calls this: its kept tail is measured, and a refund
-        against an unmeasured tail could re-open the growth the budget stops.
+        a conversation that had reached its budget can inline images again. The
+        owner calls this only where :func:`compaction_refunds` holds -- a kiro-cli
+        whose kept tail is verified -- because a refund against an unmeasured tail
+        could re-open the growth the budget stops. The frame is the backend
+        speaking for this session, so a prompt still owed to ``confirm`` counts
+        first.
         """
+        self.confirm()
         key, durable, ledger = self._current()
         self._record(key, durable, compact_ledger(ledger))

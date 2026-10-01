@@ -175,11 +175,12 @@ class TestConversationRegistryRebuild:
         found = mgr._scan_keep_states()
         ids = {t[0] for t in found}
         assert ids == {"keeprun1"}
-        conv_id, conv_key, sid, provider, _cwd, last_used = found[0]
+        conv_id, conv_key, sid, provider, _cwd, last_used, image_ledger = found[0]
         assert conv_key == "subagent:keeprun1"
         assert sid == "sid-x"
         assert provider == "acp"
         assert last_used > 0
+        assert image_ledger is None, "a run that inlined nothing persisted no ledger"
 
     def test_scan_uses_recorded_conversation_key(self) -> None:
         """A continuation run's state points at the ORIGINAL conversation."""

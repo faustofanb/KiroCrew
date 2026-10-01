@@ -133,6 +133,7 @@ from kiro_crew.history import (  # noqa: F401 - re-exported to the bundle's call
     mint_row_mid,
     monotonic_transcript_ts,
 )
+from kiro_crew.image_ledger import invalidate_ledger, load_image_ledger, store_image_ledger
 from kiro_crew.instances.constants import (
     DEFAULT_SESSION_TRANSFER_TIMEOUT_SECS,
     SESSION_IMPORT_MEMORY_WAIT_SECS,
@@ -601,6 +602,23 @@ def _resolve_layer_b_sid(sessions: Any, sm_key: str) -> str:
         return ""
 
 
+def _resolve_image_ledger(sm_key: str, sid: str) -> dict[str, Any] | None:
+    """The inline-image ledger of *sm_key*'s context window *sid*. **MUST run on the event loop.**
+
+    The ledger is what lets the imported conversation keep deduplicating and
+    budgeting the pictures its context window already carries; without it the
+    peer would count those pictures from zero. ``{}`` means the conversation is
+    KNOWN to carry none, which is distinct from the key being absent (an older
+    sender, whose history is unknowable to the peer). ``None`` when the live
+    map holds no record for the key.
+    """
+    try:
+        return load_image_ledger(sm_key, sid)
+    except Exception:
+        logger.debug("session_transfer: image ledger lookup failed for %s", sm_key, exc_info=True)
+        return None
+
+
 def _read_layer_b(sid: str) -> dict[str, Any] | None:
     """Read Layer B (the kiro-cli context) for *sid*. **Blocking IO, thread-safe.**
 
@@ -968,6 +986,30 @@ def _join_layer_b(sessions: Any, sm_key: str, sid: str) -> bool:
         return False
 
 
+def _join_image_ledger(sm_key: str, sid: str, ledger: dict[str, Any] | None) -> bool:
+    """Give the joined context window the sender's inline-image ledger. **MUST run on the event loop.**
+
+    The context window arrived with every picture the sender inlined; the ledger
+    is what keeps those pictures deduplicated and budgeted here, re-bound to the
+    sid the files were rewritten under. A prompt the sender had written but never
+    confirmed is read as uncertain, as on any recovery. A bundle without the key
+    comes from a sender that did not carry ledgers: whatever its context window
+    holds is unknowable here and counts from zero, which is said once in the log
+    rather than guessed.
+    """
+    if ledger is None:
+        logger.info(
+            "session_transfer: %s arrived without an image ledger; pictures already in "
+            "its context window are not counted",
+            sm_key,
+        )
+        return False
+    stored = store_image_ledger(sm_key, {**invalidate_ledger(ledger), "sid": sid})
+    if not stored:
+        logger.warning("session_transfer: image ledger for %s could not be stored", sm_key)
+    return stored
+
+
 def _snapshot_source_record(
     state: DashboardState, slot: _ChatSlot, session_key: str
 ) -> dict[str, Any]:
@@ -1273,6 +1315,9 @@ async def build_transfer_bundle_async(
         else:
             layer_b_sid = _resolve_layer_b_sid(getattr(state, "sessions", None), sm_key)
             layer_b_withheld = False
+        # The ledger describes exactly the context window Layer B carries, so it
+        # is read on the loop, beside the sid, and travels with it.
+        image_ledger = _resolve_image_ledger(sm_key, layer_b_sid) if layer_b_sid else None
         # Read AND assemble off the loop. Assembly redacts every assistant turn,
         # and the transcript can run to the bundle cap, so those regex scans are
         # far too much CPU to hold the loop with — the same starvation that
@@ -1288,6 +1333,7 @@ async def build_transfer_bundle_async(
             layer_b_sid,
             layer_b_withheld,
             source,
+            image_ledger,
         )
         # Re-check the guards AFTER the await, not only before it. A rewind or a
         # mid-stream flush can land during the threaded read, and the boundary
@@ -1364,12 +1410,13 @@ def _read_and_assemble(
     layer_b_sid: str = "",
     layer_b_skipped: bool = False,
     source: dict[str, Any] | None = None,
+    image_ledger: dict[str, Any] | None = None,
 ) -> TransferBundle:
     """Read the transcript + Layer B and assemble the bundle. **Runs in a thread.**
 
     Touches no slot state and no session map — *tail*, *title*, *agent*,
-    *layer_b_sid* and *source* are all snapshots the caller took on the event
-    loop — so it is safe off-loop. Only the file reads happen here.
+    *layer_b_sid*, *source* and *image_ledger* are all snapshots the caller took
+    on the event loop — so it is safe off-loop. Only the file reads happen here.
     """
     history, publication_keys = _read_chained_history(state, session_key)
     history.extend(tail)
@@ -1383,7 +1430,9 @@ def _read_and_assemble(
         # which means there was never a context to carry.
         layer_b_skipped = True
     try:
-        payload = _assemble_bundle(history, title, agent, origin, layer_b, layer_b_skipped, source)
+        payload = _assemble_bundle(
+            history, title, agent, origin, layer_b, layer_b_skipped, source, image_ledger
+        )
         return TransferBundle(payload, publication_keys=publication_keys)
     except BaseException:
         release_bundle_files({"layer_b": layer_b})
@@ -1398,6 +1447,7 @@ def _assemble_bundle(
     layer_b: dict[str, Any] | None = None,
     layer_b_skipped: bool = False,
     source: dict[str, Any] | None = None,
+    image_ledger: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Turn a merged transcript into the wire bundle. Pure — thread-safe.
 
@@ -1456,6 +1506,11 @@ def _assemble_bundle(
     # (its paths and title are neutralised on import).
     if layer_b:
         bundle["layer_b"] = {"envelope": layer_b["envelope"], "events": layer_b["events"]}
+        if image_ledger is not None:
+            # The pictures Layer B carries, as the sender counted them, so the
+            # peer keeps deduplicating and budgeting them instead of starting from
+            # zero. ``{}`` says "none", which an older sender's absent key cannot.
+            bundle["layer_b"]["image_ledger"] = image_ledger
     elif layer_b_skipped:
         # An EXPLICIT degradation flag, because an absent ``layer_b`` is ambiguous
         # on its own: it means either "this session never had a kiro-cli context"
@@ -2373,6 +2428,13 @@ def _validate_bundle(body: Any) -> tuple[dict[str, Any], web.Response | None]:
         if not isinstance(events, str):
             return {}, _reject("layer_b.events must be a string", "transfer_layer_b_bad_events")
         validated["layer_b"] = {"envelope": env, "events": events}
+        ledger = layer_b.get("image_ledger")
+        if ledger is not None:
+            if not isinstance(ledger, dict):
+                return {}, _reject(
+                    "layer_b.image_ledger must be an object", "transfer_layer_b_bad_image_ledger"
+                )
+            validated["layer_b"]["image_ledger"] = ledger
 
     return validated, None
 
@@ -2688,9 +2750,12 @@ async def _install_arrived_bundle(
             written_sid = await asyncio.to_thread(_write_layer_b_files, layer_b, slot.agent)
             # On disk now; the text is the largest thing an arrival holds and
             # nothing below reads it.
+            image_ledger = layer_b.get("image_ledger")
             layer_b = bundle["layer_b"] = {"envelope": layer_b.get("envelope")}
             layer_b_sid = written_sid or ""
             resumable = bool(layer_b_sid) and _join_layer_b(sessions, sm_key, layer_b_sid)
+            if resumable:
+                _join_image_ledger(sm_key, layer_b_sid, image_ledger)
             if not resumable:
                 logger.info(
                     "session_transfer: imported %s without Layer B; "

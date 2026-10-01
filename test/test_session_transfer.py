@@ -2261,6 +2261,132 @@ async def test_imported_tab_is_not_marked_when_layer_b_landed(monkeypatch):
     assert "transcript only" not in slot.title
 
 
+def test_the_image_ledger_rides_inside_layer_b_and_an_empty_one_is_still_said(tmp_path):
+    """The ledger describes exactly the context window Layer B carries, so it
+    travels with it; ``{}`` tells the peer the window holds no counted picture,
+    which an absent key (an older sender) cannot."""
+    from kiro_crew.dashboard import session_transfer as st
+
+    layer_b = {"envelope": {"session_id": "s"}, "events": st.LayerBEvents(tmp_path / "e.jsonl")}
+    (tmp_path / "e.jsonl").write_text("", encoding="utf-8")
+    ledger = {"sid": "s", "hashes": ["a" * 64], "b64_bytes": 120, "recent": [], "pending_text": 0}
+    with_ledger = st._assemble_bundle([], "t", "", "mac", layer_b, False, None, ledger)
+    assert with_ledger["layer_b"]["image_ledger"] == ledger
+    known_none = st._assemble_bundle([], "t", "", "mac", layer_b, False, None, {})
+    assert known_none["layer_b"]["image_ledger"] == {}
+    older_sender = st._assemble_bundle([], "t", "", "mac", layer_b, False, None, None)
+    assert "image_ledger" not in older_sender["layer_b"]
+    no_context = st._assemble_bundle([], "t", "", "mac", None, False, None, ledger)
+    assert "layer_b" not in no_context, "a ledger never travels without its window"
+
+
+def test_resolve_image_ledger_is_the_loop_side_lookup(monkeypatch):
+    from kiro_crew import image_ledger
+    from kiro_crew.dashboard import session_transfer as st
+    from kiro_crew.session_map import SessionMap
+
+    sm = SessionMap()
+    sm.set("dashboard:1", "sid-1")
+    sm.set_image_ledger(
+        "dashboard:1",
+        {"sid": "sid-1", "hashes": ["b" * 64], "b64_bytes": 7, "recent": [], "pending_text": 0},
+    )
+    image_ledger.set_image_ledger_store(sm)
+    try:
+        assert st._resolve_image_ledger("dashboard:1", "sid-1")["hashes"] == ["b" * 64]
+        assert st._resolve_image_ledger("dashboard:1", "other-sid")["hashes"] == [], "known none"
+        assert st._resolve_image_ledger("dashboard:9", "sid-1") is None, "no record"
+    finally:
+        image_ledger.set_image_ledger_store(None)
+
+
+def test_validate_rejects_a_non_object_image_ledger():
+    _bundle, err = _validate_bundle(
+        _valid(layer_b={"envelope": {}, "events": "e", "image_ledger": "nope"})
+    )
+    assert err is not None and "image_ledger" in err.text
+    bundle, err = _validate_bundle(
+        _valid(layer_b={"envelope": {}, "events": "e", "image_ledger": {}})
+    )
+    assert err is None and bundle["layer_b"]["image_ledger"] == {}
+
+
+@pytest.mark.asyncio
+async def test_import_joins_the_senders_ledger_under_the_rewritten_sid(monkeypatch):
+    """The arriving context window holds the sender's pictures; its ledger lands on
+    the new entry, re-bound to the sid the files were rewritten under, with a
+    prompt the sender never confirmed read as uncertain -- so the peer keeps
+    deduplicating and budgeting instead of counting from zero."""
+    from kiro_crew import image_ledger
+    from kiro_crew.dashboard import session_transfer as st
+    from kiro_crew.session_map import SessionMap
+
+    sm = SessionMap()
+    image_ledger.set_image_ledger_store(sm)
+    joined: dict[str, str] = {}
+
+    def _join(sessions, sm_key, sid):
+        sm.set(sm_key, sid)  # what seed_conversation does on the live map
+        joined.update(key=sm_key, sid=sid)
+        return True
+
+    monkeypatch.setattr(st, "_write_layer_b_files", lambda *_a, **_k: "new-sid")
+    monkeypatch.setattr(st, "_join_layer_b", _join)
+    sender_ledger = {
+        "sid": "sender-sid",
+        "hashes": ["c" * 64],
+        "b64_bytes": 300,
+        "recent": [{"b": 200, "t": 0, "after": 0}],
+        "pending_text": 5,
+        "unconfirmed": {"hashes": ["d" * 64], "recent": [], "pending_text": 0, "b": 100},
+    }
+    try:
+        slot = await _run_import(
+            st,
+            monkeypatch,
+            _valid(layer_b={"envelope": {}, "events": "e", "image_ledger": sender_ledger}),
+            return_slot=True,
+        )
+        assert joined["sid"] == "new-sid"
+        landed = sm.get_image_ledger(joined["key"])
+        assert landed["sid"] == "new-sid" and landed["hashes"] == ["c" * 64]
+        assert landed["b64_bytes"] == 300 and landed["recent"] == [{"b": 200, "t": 0, "after": 0}]
+        assert landed["unconfirmed"] is None and landed["uncertain_bytes"] == 100
+        assert "transcript only" not in slot.title
+    finally:
+        image_ledger.set_image_ledger_store(None)
+
+
+@pytest.mark.asyncio
+async def test_import_from_an_older_sender_names_the_unknowable_history(monkeypatch, caplog):
+    """No ``image_ledger`` key: the sender did not carry ledgers. The window's
+    pictures are unknowable here and count from zero; said once, not guessed."""
+    import logging
+
+    from kiro_crew import image_ledger
+    from kiro_crew.dashboard import session_transfer as st
+    from kiro_crew.session_map import SessionMap
+
+    sm = SessionMap()
+    image_ledger.set_image_ledger_store(sm)
+    keys: list[str] = []
+
+    def _join(sessions, sm_key, sid):
+        sm.set(sm_key, sid)
+        keys.append(sm_key)
+        return True
+
+    monkeypatch.setattr(st, "_write_layer_b_files", lambda *_a, **_k: "new-sid")
+    monkeypatch.setattr(st, "_join_layer_b", _join)
+    try:
+        with caplog.at_level(logging.INFO, logger="kiro_crew.dashboard.session_transfer"):
+            await _run_import(st, monkeypatch, _valid(layer_b={"envelope": {}, "events": "e"}))
+        assert sm.get_image_ledger(keys[0]) == {}, "nothing invented"
+        assert any("without an image ledger" in r.getMessage() for r in caplog.records)
+    finally:
+        image_ledger.set_image_ledger_store(None)
+
+
 @pytest.mark.asyncio
 async def test_a_v1_import_is_not_marked_transcript_only(monkeypatch):
     """A v1 bundle carries no context by construction — the copy is exactly what

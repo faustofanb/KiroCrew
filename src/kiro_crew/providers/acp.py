@@ -631,6 +631,15 @@ class AcpProvider(LLMProvider):
         """
         return str(getattr(self._client, "agent_version", "") or "")
 
+    def image_ledger_snapshot(self) -> dict[str, Any] | None:
+        """The live conversation's inline-image ledger, or ``None`` when it counts nothing.
+
+        Both client shapes expose the same method; a shape that never carried a
+        ledger (a placeholder before startup) answers ``None``.
+        """
+        snapshot = getattr(self._client, "image_ledger_snapshot", None)
+        return snapshot() if callable(snapshot) else None
+
     @property
     def cwd(self) -> str:
         """Working directory this provider operates in.

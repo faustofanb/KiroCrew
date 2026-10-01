@@ -156,6 +156,9 @@ with no row here.
      - driver-internal (whether ``initialize`` carries ``_meta.kiro.settings``)
    * - ``ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD``
      - pre-session registry query (whether the dashboard may skip a session reset)
+   * - ``ACP_BACKENDS_IMAGE_LEDGER_REFUND``
+     - driver-internal (whether a completed compaction refunds the inline-image
+       ledger, version-gated per process by the ledger's verified release range)
    * - ``ACP_BACKENDS_STRUCTURED_REFUSAL``
      - driver-internal (whether the metadata refusal parser is consulted)
    * - ``ACP_BACKENDS_HOOKS_LIST``
@@ -2037,6 +2040,20 @@ ACP_BACKENDS_CLIENT_META_SETTINGS = frozenset({ACP_BACKEND_KAS})
 # deepseek is not a member: its MCP servers arrive as a ``session/new`` array, so its
 # running set is described by the request that made the session and by no file.
 ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD = frozenset({ACP_BACKEND_KIRO})
+
+# Backends whose compaction REFUNDS the inline-image ledger: the layer that
+# dedups and budgets the pictures a session inlines reads the kept tail of this
+# harness's compaction from its source, so it can tell which pictures a
+# compaction left in the replay and give the rest of the allowance back.
+# Membership is exactly the set of harnesses whose kept tail has been READ and
+# mirrored (harness-parity H6), and -- like hot reload -- the grant is version-
+# gated per process by ``image_ledger.kiro_cli_compaction_verified``: a kiro-cli
+# release outside the verified range keeps the ledger across its compactions.
+# No other harness is a member: a compaction whose kept tail is unmeasured gets
+# no refund, because refunding pictures the replay still carries would re-open
+# the request-body growth the ledger exists to stop. A harness earns membership
+# by having its compaction source read, never by reporting a compaction frame.
+ACP_BACKENDS_IMAGE_LEDGER_REFUND = frozenset({ACP_BACKEND_KIRO})
 
 # Backends on which a Side Chat turn may EXECUTE read-only tools under
 # ``ToolApprovalPolicy.READ_ONLY``. The allowance rests on a kiro-cli agent-spec

@@ -740,6 +740,10 @@ class TerminalCoordinator(ManagerComponent):
         # without the fence (a test double) is not fenced: the passes and their
         # post-pass read are the whole answer.
         with ending_fence(self._manager._sessions, session_key):
+            # The run's ledger lives on the provider both branches below take
+            # away; read it synchronously first, written after the kill decides
+            # (``_persist_image_ledger`` below) so the passes keep their order.
+            image_ledger_snapshot = self._manager._snapshot_image_ledger(info, session_key)
             try:
                 if info._session_sharing:
                     # Session-sharing subagent: NEVER SIGKILL the shared runtime —
@@ -985,6 +989,11 @@ class TerminalCoordinator(ManagerComponent):
             if self._manager._release_slot(info):
                 self._manager._running_count = max(0, self._manager._running_count - 1)
                 self._manager._drain_queue()
+
+            # The ledger read before the passes, written once the record and the
+            # slot are settled so it never sits between the settle and the
+            # tombstone; a continuation seeds the conversation from it.
+            await self._manager._persist_image_ledger(info, image_ledger_snapshot)
 
             try:
                 sel().log_tool_invocation(

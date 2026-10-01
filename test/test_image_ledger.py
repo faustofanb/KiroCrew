@@ -28,12 +28,13 @@ import base64
 import io
 import json
 import logging
+import random
 from pathlib import Path
 
 import pytest
 
 from kiro_crew import image_ledger
-from kiro_crew.acp.client import AcpClient
+from kiro_crew.acp.client import AcpClient, AcpProcessDied
 from kiro_crew.acp.prompt_blocks import (
     MAX_IMAGE_B64_BYTES,
     MAX_IMAGE_EDGE_PX,
@@ -48,8 +49,11 @@ from kiro_crew.acp.types import (
     METHOD_COMPACTION_STATUS,
     JsonRpcMessage,
 )
+from kiro_crew.agent_sdk.backends import ACP_BACKEND_KAS, ACP_BACKEND_KIRO
 from kiro_crew.image_ledger import (
     COMPACTION_KEPT_PAIRS,
+    COMPACTION_VERIFIED_KIRO_CLI_LAST_NIGHTLY,
+    COMPACTION_VERIFIED_KIRO_CLI_RELEASES,
     COMPACTION_WALK_TARGET_BYTES,
     IMAGE_BLOCK_SOURCE_KEY,
     MAX_LEDGER_HASHES,
@@ -60,9 +64,12 @@ from kiro_crew.image_ledger import (
     SessionImageBudget,
     apply_image_budget,
     compact_ledger,
+    compaction_refunds,
     empty_ledger,
     image_digest,
+    kiro_cli_compaction_verified,
     normalize_ledger,
+    stage_written,
     withheld_notice,
 )
 from kiro_crew.session_map import SessionMap
@@ -72,6 +79,9 @@ SPEC = ROOT / "docs" / "system-specs" / "modules" / "acp-client.md"
 
 MIB = 1024 * 1024
 SID = "sid-1"
+#: A kiro-cli release inside the verified range, and one past it.
+VERIFIED_VERSION = "2.24.1"
+NEWER_VERSION = "2.24.2"
 
 
 def _data(seed: int, size: int = 120) -> str:
@@ -196,7 +206,8 @@ class TestDedup:
         assert second.ledger["b64_bytes"] == first.ledger["b64_bytes"]
         text = len(second.blocks[0]["text"].encode("utf-8"))
         assert first.ledger["recent"] == [{"b": len(_data(1)), "t": 0, "after": 0}]
-        assert second.ledger["recent"] == [{"b": len(_data(1)), "t": text, "after": 1}]
+        assert second.ledger["recent"] == [{"b": len(_data(1)), "t": 0, "after": 1}]
+        assert second.ledger["pending_text"] == text, "charged to the record once answered"
 
     def test_the_key_is_content_not_name_or_path(self):
         ledger = apply_image_budget(_prompt((1, "a.png", "/one/a.png")), None).ledger
@@ -440,7 +451,15 @@ class TestLedgerNormalization:
             "hashes": [good, "short", 12, "x" * 65, None, "g" * 64, good.upper(), "0" * 63 + "-"],
             "b64_bytes": -4,
         }
-        assert normalize_ledger(raw) == {"sid": "", "hashes": [good], "b64_bytes": 0, "recent": []}
+        assert normalize_ledger(raw) == {
+            "sid": "",
+            "hashes": [good],
+            "b64_bytes": 0,
+            "recent": [],
+            "pending_text": 0,
+            "uncertain_bytes": 0,
+            "unconfirmed": None,
+        }
 
     def test_the_sid_is_kept_when_it_is_a_string(self):
         assert normalize_ledger({"sid": "abc"})["sid"] == "abc"
@@ -467,7 +486,15 @@ class TestLedgerNormalization:
         raw = {"sid": SID, "hashes": _NeverIterated(digests), "b64_bytes": 3}
         with caplog.at_level(logging.WARNING, logger="kiro_crew.image_ledger"):
             ledger = normalize_ledger(raw)
-        assert ledger == {"sid": SID, "hashes": digests[overflow:], "b64_bytes": 3, "recent": []}
+        assert ledger == {
+            "sid": SID,
+            "hashes": digests[overflow:],
+            "b64_bytes": 3,
+            "recent": [],
+            "pending_text": 0,
+            "uncertain_bytes": 0,
+            "unconfirmed": None,
+        }
         messages = [r.getMessage() for r in caplog.records]
         assert len(messages) == 1, messages
         assert f"{overflow} entr" in messages[0] and str(MAX_LEDGER_HASHES) in messages[0]
@@ -529,7 +556,13 @@ class TestSessionRecord:
         ledger = _ledger(image_digest("a"), image_digest("b"), b64_bytes=4321)
         assert sm.set_image_ledger("dashboard:1", ledger) is True
         # A fresh instance reads the file: that is what a gateway restart does.
-        assert SessionMap().get_image_ledger("dashboard:1") == {**ledger, "recent": []}
+        assert SessionMap().get_image_ledger("dashboard:1") == {
+            **ledger,
+            "recent": [],
+            "pending_text": 0,
+            "uncertain_bytes": 0,
+            "unconfirmed": None,
+        }
         assert SessionMap().mapped_sid("dashboard:1") == SID, "the sid is untouched"
 
     def test_a_new_native_conversation_starts_an_empty_ledger(self, patched_map):
@@ -604,7 +637,8 @@ class TestSessionRecord:
 
         sent = await budget.apply(_prompt((1, "a.png", "/t/a.png")))
         assert len(_image_blocks(sent)) == 1
-        budget.commit()  # the prompt was written
+        budget.commit()  # the prompt was written...
+        budget.confirm()  # ...and the runtime's first frame proved it accepted
         # The deferred flush lands (and its task retires) before the "restart".
         await first_map.aclose()
 
@@ -623,6 +657,7 @@ class TestSessionRecord:
         budget = _budget("subagent:x")
         assert len(_image_blocks(await budget.apply(_prompt((1, "a.png", ""))))) == 1
         budget.commit()
+        budget.confirm()
         again = await budget.apply(_prompt((1, "a.png", "")))
         assert _image_blocks(again) == []
         assert sm.get_image_ledger("subagent:x") is None, "no entry was materialized"
@@ -635,6 +670,7 @@ class TestSessionRecord:
         budget = SessionImageBudget(lambda: "subagent:x", lambda: sid["value"])
         await budget.apply(_prompt((1, "a.png", "")))
         budget.commit()
+        budget.confirm()
         assert _image_blocks(await budget.apply(_prompt((1, "a.png", "")))) == []
         sid["value"] = "two"  # the owner reset onto a fresh native conversation
         assert len(_image_blocks(await budget.apply(_prompt((1, "a.png", ""))))) == 1
@@ -644,6 +680,7 @@ class TestSessionRecord:
         budget = _budget("dashboard:1")
         assert len(_image_blocks(await budget.apply(_prompt((1, "a.png", ""))))) == 1
         budget.commit()
+        budget.confirm()
         assert _image_blocks(await budget.apply(_prompt((1, "a.png", "")))) == []
 
     @pytest.mark.asyncio
@@ -654,7 +691,7 @@ class TestSessionRecord:
 
 class TestStagedCommit:
     @pytest.mark.asyncio
-    async def test_apply_stages_and_only_commit_records(self, patched_map):
+    async def test_apply_stages_commit_charges_and_confirm_records(self, patched_map):
         sm = SessionMap()
         sm.set("dashboard:1", SID)
         image_ledger.set_image_ledger_store(sm)
@@ -662,9 +699,43 @@ class TestStagedCommit:
         await budget.apply(_prompt((1, "a.png", "")))
         assert sm.get_image_ledger("dashboard:1") == {}, "staged, not recorded"
         budget.commit()
-        assert sm.get_image_ledger("dashboard:1")["hashes"] == [image_digest(_data(1))]
-        assert sm.get_image_ledger("dashboard:1")["sid"] == SID
+        written = sm.get_image_ledger("dashboard:1")
+        assert written["sid"] == SID
+        assert written["b64_bytes"] == len(_data(1)), "charged at the write"
+        assert written["hashes"] == [] and written["recent"] == [], "digests and advance wait"
+        assert written["unconfirmed"] == {
+            "hashes": [image_digest(_data(1))],
+            "recent": _recent((len(_data(1)), 0, 0)),
+            "pending_text": len("look: [image: a.png]"),
+            "b": len(_data(1)),
+        }
+        budget.confirm()
+        accepted = sm.get_image_ledger("dashboard:1")
+        assert accepted["hashes"] == [image_digest(_data(1))]
+        assert accepted["recent"] == _recent((len(_data(1)), 0, 0))
+        assert accepted["unconfirmed"] is None and accepted["uncertain_bytes"] == 0
+        budget.confirm()  # idempotent
         budget.commit()  # nothing staged: a no-op
+        assert sm.get_image_ledger("dashboard:1") == accepted
+        await sm.aclose()
+
+    @pytest.mark.asyncio
+    async def test_an_unconfirmed_prompt_is_invalidated_by_the_next_one(self, patched_map):
+        """The runtime never spoke for the written prompt: the next prompt reads
+        its bytes as uncertain (charged for good), its digests as unknown (the
+        retry inlines the picture again) and its advance as never made."""
+        sm = SessionMap()
+        sm.set("dashboard:1", SID)
+        image_ledger.set_image_ledger_store(sm)
+        budget = _budget("dashboard:1")
+        await budget.apply(_prompt((1, "a.png", "")))
+        budget.commit()  # written; the runtime died before any frame
+        retry = await _budget("dashboard:1").apply(_prompt((1, "a.png", "")))  # the re-queue
+        assert len(_image_blocks(retry)) == 1, "no false sent-earlier for an undelivered image"
+        ledger = sm.get_image_ledger("dashboard:1")
+        assert ledger["uncertain_bytes"] == len(_data(1))
+        assert ledger["b64_bytes"] == len(_data(1)) and ledger["unconfirmed"] is None
+        assert ledger["hashes"] == [] and ledger["recent"] == []
         await sm.aclose()
 
     @pytest.mark.asyncio
@@ -684,11 +755,32 @@ class TestStagedCommit:
         await sm.aclose()
 
     @pytest.mark.asyncio
+    async def test_abandon_charges_the_write_as_uncertain(self, patched_map):
+        """A write that raised may have left its bytes with the runtime."""
+        sm = SessionMap()
+        sm.set("dashboard:1", SID)
+        image_ledger.set_image_ledger_store(sm)
+        budget = _budget("dashboard:1")
+        await budget.apply(_prompt((1, "a.png", "")))
+        budget.abandon()
+        ledger = sm.get_image_ledger("dashboard:1")
+        assert ledger["uncertain_bytes"] == len(_data(1)) == ledger["b64_bytes"]
+        assert ledger["hashes"] == [] and ledger["recent"] == [] and ledger["unconfirmed"] is None
+        assert len(_image_blocks(await budget.apply(_prompt((1, "a.png", ""))))) == 1
+        local = _budget("subagent:x")
+        await local.apply(_prompt((1, "a.png", "")))
+        local.abandon()
+        assert local._local["uncertain_bytes"] == len(_data(1))
+        assert len(_image_blocks(await local.apply(_prompt((1, "a.png", ""))))) == 1
+        await sm.aclose()
+
+    @pytest.mark.asyncio
     async def test_a_new_apply_replaces_an_uncommitted_stage(self):
         budget = _budget("k")
         await budget.apply(_prompt((1, "a.png", "")))
         await budget.apply(_prompt((2, "b.png", "")))
         budget.commit()
+        budget.confirm()
         assert budget._local["hashes"] == [image_digest(_data(2))]
 
     @pytest.mark.asyncio
@@ -778,20 +870,27 @@ class TestCompaction:
         text = len(b"look: [image: t.png]")
         ledger = apply_image_budget(_prompt((1, "t.png", ""), size=big), None).ledger
         ledger = apply_image_budget(_prompt((2, "t.png", ""), size=big), ledger).ledger
-        assert ledger["recent"] == _recent((big, text, 1), (big, 0, 0))
-        # One text prompt: both within the kept pairs.
+        assert ledger["recent"] == _recent((big, 0, 1), (big, 0, 0))
+        assert ledger["pending_text"] == text, "the second prompt's text is owed, not yet charged"
+        # One text prompt: both within the kept pairs; the owed text lands.
         ledger = apply_image_budget(_text("a"), ledger).ledger
-        assert ledger["recent"] == _recent((big, text + 1, 2), (big, 1, 1))
+        assert ledger["recent"] == _recent((big, text, 2), (big, 0, 1))
         # A second: the older one is past the pairs and the newer image alone
         # reached the target, so no compaction could keep it -- dropped now.
         ledger = apply_image_budget(_text("b"), ledger).ledger
-        assert ledger["recent"] == _recent((big, 2, 2))
+        assert ledger["recent"] == _recent((big, 1, 2))
         # Digests and the total stay charged until a compaction says otherwise.
         assert len(ledger["hashes"]) == 2 and ledger["b64_bytes"] == 2 * big
         ledger = apply_image_budget(_text("c"), ledger).ledger
-        assert ledger["recent"] == _recent((big, 3, 3)), "only the walk can keep it now"
+        assert ledger["recent"] == _recent((big, 2, 3)), "only the walk can keep it now"
         assert compact_ledger(ledger)["b64_bytes"] == big
+        # A paste the size of the target is in flight: kiro-cli keeps the prompt
+        # without counting it, so the record survives this write...
         ledger = apply_image_budget(_text("d" * COMPACTION_WALK_TARGET_BYTES), ledger).ledger
+        assert ledger["recent"] == _recent((big, 3, 3))
+        assert compact_ledger(ledger)["b64_bytes"] == big
+        # ...and leaves at the next, once the paste is history the walk counts.
+        ledger = apply_image_budget(_text("e"), ledger).ledger
         assert ledger["recent"] == []
         assert compact_ledger(ledger)["b64_bytes"] == 0
 
@@ -800,6 +899,62 @@ class TestCompaction:
         result = apply_image_budget(blocks, empty_ledger(SID))
         assert result.blocks is blocks
         assert result.ledger == empty_ledger(SID)
+        assert result.ledger["pending_text"] == 0, "nothing to charge later with no record"
+
+    def test_the_text_of_the_prompt_in_flight_is_walked_only_once_it_is_answered(self):
+        """kiro-cli's walk skips the trailing user message -- the prompt whose
+        overflow triggered the compaction is kept and not counted -- so a prompt
+        large enough to reach the walk target by itself must not push an older
+        picture out of the charge while kiro-cli still replays it."""
+        ledger = apply_image_budget(_prompt((1, "shot.png", ""), size=200_000), None).ledger
+        for _ in range(COMPACTION_KEPT_PAIRS + 1):
+            ledger = apply_image_budget(_text("small"), ledger).ledger
+        assert ledger["recent"][0]["after"] == COMPACTION_KEPT_PAIRS + 1, "past the kept pairs"
+        big = apply_image_budget(_text("w" * COMPACTION_WALK_TARGET_BYTES), ledger).ledger
+        assert big["pending_text"] == COMPACTION_WALK_TARGET_BYTES
+        assert big["recent"][0]["t"] == 3 * len("small"), "the prompt in flight is not yet charged"
+        compacted = compact_ledger(big)
+        assert compacted["b64_bytes"] == 200_000, "kiro-cli keeps the pair that crosses the target"
+        assert (
+            compacted["pending_text"] == COMPACTION_WALK_TARGET_BYTES
+        ), "still owed after the refund"
+        # Answered and followed by another prompt, the big prompt is history the
+        # walk counts: no compaction could keep the picture now, so its record is
+        # dropped at this write and the next compaction releases its bytes.
+        later = apply_image_budget(_text("next"), compacted).ledger
+        assert later["recent"] == []
+        assert later["b64_bytes"] == 200_000, "charged until a compaction says otherwise"
+        assert later["pending_text"] == 0, "nothing left for the owed text to reach"
+        assert compact_ledger(later)["b64_bytes"] == 0
+
+    def test_the_deferred_text_is_charged_to_records_older_than_its_prompt_only(self):
+        """The record of the prompt that owes the text gains nothing from it: the
+        text written after THAT prompt is the next one, itself deferred."""
+        ledger = apply_image_budget(_prompt((1, "a.png", ""), lead=""), None).ledger
+        b_blocks = _prompt((2, "b.png", ""), lead="")
+        b_text = len(b_blocks[0]["text"].encode("utf-8"))
+        ledger = apply_image_budget(b_blocks, ledger).ledger
+        assert [e["t"] for e in ledger["recent"]] == [0, 0], "b's text is deferred"
+        assert ledger["pending_text"] == b_text
+        ledger = apply_image_budget(_text("cccccc"), ledger).ledger
+        assert [e["t"] for e in ledger["recent"]] == [b_text, 0], "a gains b's text; b nothing yet"
+        assert ledger["pending_text"] == 6
+        ledger = apply_image_budget(_text("d"), ledger).ledger
+        assert [e["t"] for e in ledger["recent"]] == [b_text + 6, 6]
+        assert ledger["pending_text"] == 1
+
+    def test_the_deferred_text_persists_bounded_and_malformed_reads_as_nothing(self):
+        ledger = apply_image_budget(_prompt((1, "a.png", "")), None).ledger
+        ledger = apply_image_budget(_text("x" * 10), ledger).ledger
+        assert normalize_ledger(json.loads(json.dumps(ledger))) == ledger
+        assert (
+            normalize_ledger({"pending_text": 10**9})["pending_text"]
+            == COMPACTION_WALK_TARGET_BYTES
+        )
+        assert normalize_ledger({"pending_text": -1})["pending_text"] == 0
+        assert normalize_ledger({"pending_text": True})["pending_text"] == 0
+        assert normalize_ledger({"pending_text": "7"})["pending_text"] == 0
+        assert normalize_ledger({})["pending_text"] == 0
 
     def test_the_record_list_is_bounded(self):
         recent = [{"b": 1, "t": 0, "after": 0} for _ in range(MAX_RECENT_PROMPTS + 5)]
@@ -809,6 +964,194 @@ class TestCompaction:
             ledger = apply_image_budget(_prompt((seed + 1, "t.png", ""), lead=""), ledger).ledger
         assert len(ledger["recent"]) == MAX_RECENT_PROMPTS
         assert ledger["recent"][-1]["after"] == 0
+
+    def test_bytes_of_records_past_the_cap_stay_charged_until_their_survivor_is_summarized(self):
+        """The cap bounds the LIST, never the accounting: a big picture followed by
+        more tiny ones than the cap holds is still in kiro-cli's kept tail."""
+        big = 5 * 1024 * 1024
+        ledger = apply_image_budget(_prompt((1, "big.png", ""), size=big), None).ledger
+        for seed in range(MAX_RECENT_PROMPTS):
+            ledger = apply_image_budget(_prompt((seed + 2, "t.png", ""), lead=""), ledger).ledger
+        assert len(ledger["recent"]) == MAX_RECENT_PROMPTS
+        total = ledger["b64_bytes"]
+        assert total > big
+        assert (
+            sum(e["b"] for e in ledger["recent"]) == total
+        ), "the sliced record's bytes ride the oldest survivor"
+        assert compact_ledger(ledger)["b64_bytes"] == total, "still replayed, still charged"
+        # Only when the survivor itself is past the walk are its bytes -- and the
+        # folded ones, older still -- refunded. The paste that pushes it there is
+        # not counted while in flight; it is at the write that follows it.
+        ledger = apply_image_budget(_text("x" * COMPACTION_WALK_TARGET_BYTES), ledger).ledger
+        assert compact_ledger(ledger)["b64_bytes"] == total, "the paste is still in flight"
+        ledger = apply_image_budget(_text("y"), ledger).ledger
+        refunded = compact_ledger(ledger)
+        assert refunded["b64_bytes"] < big
+        assert refunded["b64_bytes"] == sum(e["b"] for e in ledger["recent"])
+
+    def test_repeated_folds_and_compactions_never_lose_a_charged_byte(self):
+        """Every prompt past the cap cuts one more record; each cut folds onto the
+        current oldest survivor, through as many compactions as happen along the way."""
+        big = 3 * 1024 * 1024
+        ledger = apply_image_budget(_prompt((1, "big.png", ""), size=big), None).ledger
+        for seed in range(MAX_RECENT_PROMPTS + 10):
+            ledger = apply_image_budget(_prompt((seed + 2, "t.png", ""), lead=""), ledger).ledger
+            assert len(ledger["recent"]) <= MAX_RECENT_PROMPTS
+            assert sum(e["b"] for e in ledger["recent"]) == ledger["b64_bytes"]
+            if seed % 7 == 3:
+                ledger = compact_ledger(ledger)
+                assert ledger["b64_bytes"] >= big, "the big picture is still in the kept tail"
+                assert sum(e["b"] for e in ledger["recent"]) == ledger["b64_bytes"]
+        assert ledger["recent"][0]["b"] > big, "the oldest survivor carries every cut record"
+
+    def test_a_folded_record_survives_persist_and_reload(self, patched_map):
+        big = 5 * 1024 * 1024
+        ledger = apply_image_budget(_prompt((1, "big.png", ""), size=big), None).ledger
+        for seed in range(MAX_RECENT_PROMPTS + 2):
+            ledger = apply_image_budget(_prompt((seed + 2, "t.png", ""), lead=""), ledger).ledger
+        assert normalize_ledger(json.loads(json.dumps(ledger))) == ledger
+        sm = SessionMap()
+        sm.set("dashboard:1", SID)
+        assert sm.set_image_ledger("dashboard:1", ledger) is True
+        reloaded = SessionMap().get_image_ledger("dashboard:1")
+        assert reloaded == ledger
+        assert compact_ledger(reloaded)["b64_bytes"] == ledger["b64_bytes"]
+
+    def test_folding_changes_no_keep_decision_and_releases_no_earlier_than_exact(self, monkeypatch):
+        """Against the same prompt sequence, an uncapped ledger (no folds) keeps
+        exactly the same positions; the folded one refunds no byte the uncapped
+        one still holds."""
+        rng = random.Random(7)
+        sequence = [
+            (
+                rng.choice([0, 1, 1, 1, 2]),
+                rng.choice([200, 200, 400, 400, 4000]),
+                rng.randrange(0, 40),
+            )
+            for _ in range(160)
+        ]
+
+        def run(cap: int) -> list[tuple[list[int], int]]:
+            monkeypatch.setattr(image_ledger, "MAX_RECENT_PROMPTS", cap)
+            ledger = empty_ledger(SID)
+            trace = []
+            for i, (n_images, size, text_len) in enumerate(sequence):
+                specs = [(i * 4 + k + 1, f"i{i}-{k}.png", "") for k in range(n_images)]
+                blocks = (
+                    _prompt(*specs, lead="w" * text_len, size=size)
+                    if specs
+                    else _text("w" * text_len)
+                )
+                ledger = apply_image_budget(blocks, ledger).ledger
+                if i % 9 == 5:
+                    ledger = compact_ledger(ledger)
+                trace.append(
+                    (
+                        [e["after"] for e in ledger["recent"]][-MAX_RECENT_PROMPTS:],
+                        ledger["b64_bytes"],
+                    )
+                )
+            return trace
+
+        capped = run(MAX_RECENT_PROMPTS)
+        exact = run(10**6)
+        assert any(len(p) == MAX_RECENT_PROMPTS for p, _ in capped), "the cap was reached"
+        for (kept_capped, total_capped), (kept_exact, total_exact) in zip(capped, exact):
+            assert (
+                kept_capped == kept_exact[-MAX_RECENT_PROMPTS:]
+            ), "the same newest positions are kept"
+            assert total_capped >= total_exact, "a fold never refunds before the exact model does"
+
+    def test_charged_bytes_never_fall_below_what_kiro_cli_can_still_replay(self):
+        """Randomized conversations against an oracle of the measured kiro-cli rule:
+        keep the newest two (user, assistant) pairs plus, walking newest-first over
+        pairs, as many as it takes to reach two percent of the context window in
+        raw bytes (images at full weight, assistant replies counted), the pair
+        that crosses included; the prompt in flight is re-sent. The oracle counts
+        assistant bytes and uses a smaller window, both of which keep LESS than
+        the ledger's walk, so the ledger must never charge less than the oracle
+        still replays -- through folds, compactions and dedup alike."""
+        for seed in range(16):
+            rng = random.Random(seed)
+            window_tokens = rng.choice([200_000, 400_000, 1_000_000])
+            target = window_tokens * 2 // 100 * 4
+            # Half the conversations paste tiny pictures turn after turn, the shape
+            # that drives the record list past its cap before a compaction.
+            tiny = seed % 2 == 1
+            sizes = [200, 400, 800] if tiny else [400, 4000, 40_000, 400_000]
+            ledger = empty_ledger(SID)
+            pairs: list[tuple[int, int, int]] = (
+                []
+            )  # (user raw bytes, assistant raw bytes, kept image b64)
+            for i in range(90):
+                n_images = rng.choice([1, 1, 2] if tiny else [0, 0, 1, 1, 1, 2, 3])
+                if tiny and i == 0:
+                    n_images, size = 1, 2 * 1024 * 1024
+                else:
+                    size = rng.choice(sizes)
+                text_len = rng.randrange(0, 30 if tiny else 2000)
+                if not tiny and rng.random() < 0.1:
+                    # A paste that reaches the walk target by itself, in the turn
+                    # whose overflow triggers the compaction: kiro-cli keeps the
+                    # prompt in flight and does not count it.
+                    text_len = rng.randrange(target, 2 * target)
+                specs = [(rng.randrange(1, 12), f"i{i}-{k}.png", "") for k in range(n_images)]
+                blocks = (
+                    _prompt(*specs, lead="w" * text_len, size=size)
+                    if specs
+                    else _text("w" * text_len)
+                )
+                result = apply_image_budget(blocks, ledger)
+                if rng.random() < 0.1:
+                    # The runtime dies after the drained write and before any
+                    # frame: the prompt is written but unconfirmed. Whether
+                    # kiro-cli stored it is a coin nobody sees; the recovery
+                    # resumes the same sid and re-queues the message.
+                    stored = rng.random() < 0.5
+                    written = stage_written(ledger, result.ledger)
+                    if stored:
+                        dead_b64 = sum(len(b["data"]) for b in _image_blocks(result.blocks))
+                        dead_raw = sum(
+                            len(b["text"].encode("utf-8"))
+                            for b in result.blocks
+                            if b["type"] == "text"
+                        )
+                        pairs.append((dead_raw + dead_b64 * 3 // 4, 0, dead_b64))
+                    retry = apply_image_budget(blocks, written)
+                    assert retry.sent_earlier == result.sent_earlier, (
+                        seed,
+                        i,
+                        "an undelivered picture must not read as sent earlier",
+                    )
+                    assert retry.ledger["uncertain_bytes"] >= written["unconfirmed"]["b"]
+                    result = retry
+                ledger = result.ledger
+                sent_b64 = sum(len(b["data"]) for b in _image_blocks(result.blocks))
+                text_raw = sum(
+                    len(b["text"].encode("utf-8")) for b in result.blocks if b["type"] == "text"
+                )
+                in_flight = (text_raw + sent_b64 * 3 // 4, 0, sent_b64)
+                if rng.random() < 0.2:
+                    # kiro-cli compacts with this prompt in flight: it and the kept pairs stay.
+                    walked, kept_pairs = 0, 0
+                    for user_raw, asst_raw, _ in reversed(pairs):
+                        kept_pairs += 1
+                        walked += user_raw + asst_raw
+                        if walked >= target:
+                            break
+                    kept_pairs = max(COMPACTION_KEPT_PAIRS, kept_pairs)
+                    pairs = pairs[-kept_pairs:] if kept_pairs else []
+                    ledger = compact_ledger(ledger)
+                    replayable = sum(b64 for _, _, b64 in pairs) + in_flight[2]
+                    assert ledger["b64_bytes"] >= replayable, (
+                        seed,
+                        i,
+                        ledger["b64_bytes"],
+                        replayable,
+                    )
+                pairs.append(
+                    (in_flight[0], rng.randrange(0, 200 if tiny else 60_000), in_flight[2])
+                )
 
     def test_malformed_records_are_dropped_at_retention(self):
         raw = {
@@ -880,6 +1223,9 @@ def _handle(
     fail_send: bool = False,
     frames: list[JsonRpcMessage] | None = None,
     session_id: str = SID,
+    acp_backend: str = ACP_BACKEND_KIRO,
+    agent_version: str = VERIFIED_VERSION,
+    die_after_write: bool = False,
 ) -> AcpSessionHandle:
     """A handle on a fake runtime that records the prompt params and ends the turn.
 
@@ -889,9 +1235,13 @@ def _handle(
     write's side effect -- queueing them before the prompt would have the
     pre-turn stale drain discard them. ``fail_send`` dies at the write instead,
     the shape of a runtime that went away between the build and the write.
+    ``die_after_write`` drains the write and then dies before any frame comes
+    back: whether the backend stored the prompt is exactly what nobody knows.
+    ``agent_version`` is what the process reported at its handshake.
     """
-    runtime = AcpRuntime(work_dir=str(tmp_path))
+    runtime = AcpRuntime(work_dir=str(tmp_path), acp_backend=acp_backend)
     runtime._initialized = True
+    runtime._agent_version = agent_version
     runtime._prompt_capabilities = {"image": True}
     queue: asyncio.Queue = asyncio.Queue()
     runtime._session_queues[session_id] = queue
@@ -901,6 +1251,9 @@ def _handle(
         if fail_send:
             raise AcpRuntimeDead("died before the write")
         req_id = len(sent)
+        if die_after_write:
+            queue.put_nowait(None)  # the reader's death sentinel
+            return req_id
         for frame in frames or []:
             queue.put_nowait(frame)
         queue.put_nowait(
@@ -952,29 +1305,38 @@ class TestHandleWiring:
             assert not any(str(k).startswith("_") for k in block), block.keys()
 
     @pytest.mark.asyncio
-    async def test_a_prompt_that_never_reached_the_runtime_charges_nothing(self, tmp_path):
+    async def test_a_write_that_raised_is_charged_as_uncertain_and_never_dedups(self, tmp_path):
         """The ledger is committed by the WRITE, not the build: a runtime that dies
-        between them makes the caller re-queue the same message, and that retry
-        must still carry the image instead of a ``sent earlier`` marker."""
+        during the write makes the caller re-queue the same message, and that
+        retry must still carry the image instead of a ``sent earlier`` marker --
+        while the bytes, which may have left with the broken drain, stay charged."""
         p = _png(tmp_path, "shot.png")
+        size = len(base64.b64encode(p.read_bytes()))
         sent: list[dict] = []
         dead = _handle(tmp_path, sent, fail_send=True)
         await _turn_dies(dead, f"first {p}")
         assert [b["type"] for b in sent[0]["prompt"]] == ["text", "image"]
-        # Same handle, same key: the retry must inline again.
+        local = dead._image_budget._local
+        assert (local["hashes"], local["recent"], local["unconfirmed"]) == ([], [], None)
+        assert local["uncertain_bytes"] == size == local["b64_bytes"], "charged, not known"
+        # Same handle, same key: the retry must inline again -- and charges again.
         await _turn_dies(dead, f"retry {p}")
         assert [b["type"] for b in sent[1]["prompt"]] == ["text", "image"]
-        assert dead._image_budget._local == empty_ledger(SID)
+        assert dead._image_budget._local["uncertain_bytes"] == 2 * size
 
     @pytest.mark.asyncio
-    async def test_a_failed_write_leaves_the_durable_record_uncharged(self, tmp_path, patched_map):
+    async def test_a_failed_write_leaves_the_durable_record_without_digests(
+        self, tmp_path, patched_map
+    ):
         sm = SessionMap()
         sm.set("dashboard:1", SID)
         image_ledger.set_image_ledger_store(sm)
         p = _png(tmp_path, "shot.png")
+        size = len(base64.b64encode(p.read_bytes()))
         sent: list[dict] = []
         await _turn_dies(_handle(tmp_path, sent, fail_send=True), f"see {p}")
-        assert sm.get_image_ledger("dashboard:1") == {}
+        after_death = sm.get_image_ledger("dashboard:1")
+        assert after_death["hashes"] == [] and after_death["uncertain_bytes"] == size
         # A live handle on the same record then sends it for real.
         await _turn(_handle(tmp_path, sent), f"again {p}")
         assert [b["type"] for b in sent[1]["prompt"]] == ["text", "image"]
@@ -1072,7 +1434,9 @@ class TestHandleWiring:
 
         client._send_request = send_request
         await client._send_prompt(f"one {p}")
+        client._image_budget.confirm()  # the turn's first frame, read by _prompt_loop
         await client._send_prompt(f"two {p}")
+        client._image_budget.confirm()
         assert [b["type"] for b in sent[0]["prompt"]] == ["text", "image"]
         assert not any(str(k).startswith("_") for k in sent[0]["prompt"][1])
         assert [b["type"] for b in sent[1]["prompt"]] == ["text"]
@@ -1082,8 +1446,9 @@ class TestHandleWiring:
         assert [b["type"] for b in sent[2]["prompt"]] == ["text", "image"]
 
     @pytest.mark.asyncio
-    async def test_the_direct_client_charges_nothing_for_a_failed_write(self, tmp_path):
+    async def test_the_direct_client_charges_a_failed_write_as_uncertain(self, tmp_path):
         p = _png(tmp_path, "shot.png")
+        size = len(base64.b64encode(p.read_bytes()))
         client = AcpClient(work_dir=tmp_path, session_key="dashboard:9")
         client._session_id = "s9"
         sent: list[dict] = []
@@ -1095,7 +1460,9 @@ class TestHandleWiring:
         client._send_request = failing
         with pytest.raises(AcpRuntimeDead):
             await client._send_prompt(f"one {p}")
-        assert client._image_budget._local == empty_ledger("s9")
+        local = client._image_budget._local
+        assert local["uncertain_bytes"] == size == local["b64_bytes"]
+        assert local["hashes"] == [] and local["unconfirmed"] is None
 
         async def working(method, params):
             sent.append(params)
@@ -1126,8 +1493,10 @@ class TestHandleWiring:
 
         client._send_request = send_request
         await client._send_prompt(f"one {p}")
+        client._image_budget.confirm()
         before = dict(client._image_budget._local)
         await client._send_prompt("/clear")
+        client._image_budget.confirm()
         after = client._image_budget._local
         assert (after["hashes"], after["b64_bytes"]) == (before["hashes"], before["b64_bytes"])
         assert [b["type"] for b in sent[1]["prompt"]] == ["text"]
@@ -1148,6 +1517,7 @@ class TestHandleWiring:
 
         client._send_request = send_request
         await client._send_prompt(f"one {p}")
+        client._image_budget.confirm()
         assert client._image_budget._local["hashes"]
 
         clear_msg = JsonRpcMessage(method=METHOD_CLEAR_STATUS, params={"sessionId": "s1"})
@@ -1184,6 +1554,70 @@ def _compaction_frame(status: str = "completed", session_id: str = SID) -> JsonR
         method=METHOD_COMPACTION_STATUS,
         params={"sessionId": session_id, "status": {"type": status}, "summary": ""},
     )
+
+
+class TestCompactionVerifiedVersions:
+    """The refund is released only to a kiro-cli whose kept tail was read in its
+    source: a stable or nightly build inside the verified range. Anything the
+    range cannot place -- newer, a later nightly of the ceiling release, an rc or
+    feature build, a source build, nothing at all -- keeps the ledger."""
+
+    def test_the_range_is_the_one_the_source_was_read_at(self):
+        assert COMPACTION_VERIFIED_KIRO_CLI_RELEASES == ((2, 17, 0), (2, 24, 1))
+        assert COMPACTION_VERIFIED_KIRO_CLI_LAST_NIGHTLY == 2
+
+    @pytest.mark.parametrize(
+        "version",
+        [
+            "2.17.0",  # floor release
+            "2.17.1-nightly.1",  # first nightly past the floor
+            "2.21.0",
+            "2.21.5-nightly.8",
+            "2.24.0",
+            "2.24.1-nightly.1",
+            "2.24.1-nightly.2",  # last verified nightly of the ceiling release
+            "2.24.1",  # ceiling release
+            " 2.24.1 ",  # the handshake value is stripped
+        ],
+    )
+    def test_a_verified_build_refunds(self, version):
+        assert kiro_cli_compaction_verified(version)
+
+    @pytest.mark.parametrize(
+        "version",
+        [
+            "2.24.1-nightly.3",  # a later main than the one read
+            "2.24.2-nightly.1",
+            "2.24.2",
+            "2.25.0",
+            "3.0.0",
+            "2.16.3",  # below the floor
+            "2.16.3-nightly.3",
+            "2.24.1-rc.1",  # cut from a release branch the range says nothing about
+            "2.23.1-autocomplete-decouple.3",  # a feature build
+            "2.22.0-new-bundle.2",
+            "0.0.0-dev",  # a source build
+            "",  # no handshake yet
+            "2.24",  # not a release triple
+            "v2.24.1",
+            "kiro-cli 2.24.1",
+            "2.24.1+build.7",
+            "2.24.1-nightly",
+            "2.24.1-nightly.",
+            "2.24.1-Nightly.2",
+            "02.24.1x",
+        ],
+    )
+    def test_an_unverified_build_does_not(self, version):
+        assert not kiro_cli_compaction_verified(version)
+
+    def test_the_decision_needs_the_kiro_backend_and_a_verified_version(self):
+        assert compaction_refunds(ACP_BACKEND_KIRO, VERIFIED_VERSION)
+        assert not compaction_refunds(ACP_BACKEND_KAS, VERIFIED_VERSION)
+        assert not compaction_refunds("claude", VERIFIED_VERSION)
+        assert not compaction_refunds(ACP_BACKEND_KIRO, NEWER_VERSION)
+        assert not compaction_refunds(ACP_BACKEND_KIRO, "")
+        assert not compaction_refunds(ACP_BACKEND_KIRO, "0.0.0-dev")
 
 
 class TestCompactionWiring:
@@ -1261,21 +1695,340 @@ class TestCompactionWiring:
         assert handle._image_budget._local["hashes"] == []
 
     @pytest.mark.asyncio
+    async def test_the_drain_leaves_the_ledger_alone_for_a_fanned_out_compaction(self, tmp_path):
+        """A co-tenant's completed frame reaches the drain too; it summarized THEIR replay."""
+        p = _png(tmp_path, "shot.png")
+        sent: list[dict] = []
+        handle = _handle(tmp_path, sent)
+        await _turn(handle, f"see {p}")
+        before = dict(handle._image_budget._local)
+        assert before["hashes"]
+        foreign = _compaction_frame()
+        foreign.fanout_no_owner = True
+        handle._queue.put_nowait(foreign)
+        result = await handle.wait_for_compaction(timeout=2.0)
+        assert result["type"] == "completed"
+        after = handle._image_budget._local
+        assert (after["hashes"], after["b64_bytes"]) == (before["hashes"], before["b64_bytes"])
+        await _turn(handle, f"again {p}")
+        assert [b["type"] for b in sent[1]["prompt"]] == ["text"], "still deduped"
+
+    @pytest.mark.asyncio
     async def test_the_direct_client_refunds_on_its_compaction_chokepoint(self, tmp_path):
         p = _png(tmp_path, "shot.png")
         client = AcpClient(work_dir=tmp_path, session_key="dashboard:9")
         client._session_id = "s9"
+        client._agent_version = VERIFIED_VERSION
 
         async def send_request(method, params):
             return 1
 
         client._send_request = send_request
         await client._send_prompt(f"one {p}")
+        client._image_budget.confirm()  # the turn's first frame, read by _prompt_loop
         assert client._image_budget._local["hashes"]
         client._handle_compaction_status(_compaction_frame("failed", "s9"))
         assert client._image_budget._local["hashes"], "a failure refunds nothing"
         client._handle_compaction_status(_compaction_frame("completed", "s9"))
         assert client._image_budget._local["hashes"] == []
+
+    @pytest.mark.asyncio
+    async def test_an_unverified_kiro_cli_keeps_the_ledger_across_its_compaction(self, tmp_path):
+        """A build the range cannot place may keep a longer tail than the walk
+        mirrors; its compaction leaves the ledger charged, and the repeat deduped."""
+        p = _png(tmp_path, "shot.png")
+        sent: list[dict] = []
+        handle = _handle(tmp_path, sent, agent_version=NEWER_VERSION)
+        await _turn(handle, f"see {p}")
+        before = dict(handle._image_budget._local)
+        assert before["hashes"]
+        handle2 = _handle(tmp_path, sent, frames=[_compaction_frame()], agent_version=NEWER_VERSION)
+        handle2._image_budget = handle._image_budget
+        await _turn(handle2, "a long story")
+        after = handle._image_budget._local
+        assert (after["hashes"], after["b64_bytes"]) == (before["hashes"], before["b64_bytes"])
+        await _turn(handle2, f"again {p}")
+        assert [b["type"] for b in sent[2]["prompt"]] == ["text"], "still deduped"
+
+    @pytest.mark.asyncio
+    async def test_the_drain_keeps_the_ledger_for_an_unverified_kiro_cli(self, tmp_path):
+        p = _png(tmp_path, "shot.png")
+        sent: list[dict] = []
+        handle = _handle(tmp_path, sent, agent_version="0.0.0-dev")
+        await _turn(handle, f"see {p}")
+        before = dict(handle._image_budget._local)
+        handle._queue.put_nowait(_compaction_frame())
+        result = await handle.wait_for_compaction(timeout=2.0)
+        assert result["type"] == "completed"
+        after = handle._image_budget._local
+        assert (after["hashes"], after["b64_bytes"]) == (before["hashes"], before["b64_bytes"])
+
+    @pytest.mark.asyncio
+    async def test_the_direct_client_keeps_the_ledger_for_an_unverified_kiro_cli(self, tmp_path):
+        p = _png(tmp_path, "shot.png")
+        client = AcpClient(work_dir=tmp_path, session_key="dashboard:9")
+        client._session_id = "s9"
+        client._agent_version = "2.24.1-nightly.3"
+
+        async def send_request(method, params):
+            return 1
+
+        client._send_request = send_request
+        await client._send_prompt(f"one {p}")
+        before = dict(client._image_budget._local)
+        client._handle_compaction_status(_compaction_frame("completed", "s9"))
+        after = client._image_budget._local
+        assert (after["hashes"], after["b64_bytes"]) == (before["hashes"], before["b64_bytes"])
+
+    @pytest.mark.asyncio
+    async def test_the_decision_follows_the_version_the_resumed_process_reports(
+        self, tmp_path, patched_map
+    ):
+        """The version is per process: after a restart the new handshake decides.
+        The durable ledger charged under a verified build is kept by an
+        unverified one, and refunded again once a verified build is back."""
+        sm = SessionMap()
+        sm.set("dashboard:1", SID)
+        image_ledger.set_image_ledger_store(sm)
+        p = _png(tmp_path, "shot.png")
+        sent: list[dict] = []
+        await _turn(_handle(tmp_path, sent), f"see {p}")
+        charged = dict(sm.get_image_ledger("dashboard:1"))
+        assert charged["hashes"] and charged["b64_bytes"]
+        # Restart onto a newer kiro-cli: its compaction leaves the record alone.
+        newer = _handle(tmp_path, sent, frames=[_compaction_frame()], agent_version=NEWER_VERSION)
+        await _turn(newer, "more")
+        kept = sm.get_image_ledger("dashboard:1")
+        assert (kept["hashes"], kept["b64_bytes"]) == (charged["hashes"], charged["b64_bytes"])
+        # Restart back onto a verified kiro-cli: its compaction refunds.
+        verified = _handle(tmp_path, sent, frames=[_compaction_frame()])
+        await _turn(verified, "more still")
+        assert sm.get_image_ledger("dashboard:1")["hashes"] == []
+        await sm.aclose()
+
+
+class TestUncertainWrites:
+    """A prompt is charged when written and KNOWN only once the runtime speaks for
+    it. A runtime that dies after the drained write leaves nobody able to say
+    whether the conversation holds the prompt: its bytes stay charged for good
+    (an over-charge costs allowance; an under-charge is the wire growth this
+    layer stops), while its digests and record advance are dropped so the
+    re-queued retry inlines the picture again instead of calling it sent."""
+
+    @pytest.mark.asyncio
+    async def test_a_death_after_the_write_leaves_the_prompt_charged_but_unknown(
+        self, tmp_path, patched_map
+    ):
+        sm = SessionMap()
+        sm.set("dashboard:1", SID)
+        image_ledger.set_image_ledger_store(sm)
+        p = _png(tmp_path, "shot.png")
+        size = len(base64.b64encode(p.read_bytes()))
+        sent: list[dict] = []
+        dying = _handle(tmp_path, sent, die_after_write=True)
+        with pytest.raises(AcpProcessDied):
+            await _turn(dying, f"see {p}")
+        written = sm.get_image_ledger("dashboard:1")
+        assert written["b64_bytes"] == size, "charged at the write"
+        assert written["hashes"] == [] and written["recent"] == []
+        assert written["unconfirmed"]["hashes"] == [image_digest(sent[0]["prompt"][1]["data"])]
+        # Recovery resumes the SAME sid and re-queues the message (a new handle on
+        # the same record): the retry inlines the picture again, whatever the
+        # dead runtime did with the first copy.
+        await _turn(_handle(tmp_path, sent), f"see {p}")
+        assert [b["type"] for b in sent[1]["prompt"]] == ["text", "image"], "no false sent-earlier"
+        ledger = sm.get_image_ledger("dashboard:1")
+        assert ledger["uncertain_bytes"] == size, "the first copy stays charged"
+        assert ledger["b64_bytes"] == 2 * size, "both copies charged: the backend may hold both"
+        assert ledger["hashes"] == [image_digest(sent[1]["prompt"][1]["data"])]
+        assert ledger["recent"] == _recent((size, 0, 0)), "one position advanced, not two"
+        # Known from here: the next repeat is deduped.
+        await _turn(_handle(tmp_path, sent), f"again {p}")
+        assert [b["type"] for b in sent[2]["prompt"]] == ["text"]
+        await sm.aclose()
+
+    @pytest.mark.asyncio
+    async def test_repeated_deaths_charge_each_copy_and_never_dedup_the_retry(
+        self, tmp_path, patched_map
+    ):
+        sm = SessionMap()
+        sm.set("dashboard:1", SID)
+        image_ledger.set_image_ledger_store(sm)
+        p = _png(tmp_path, "shot.png")
+        size = len(base64.b64encode(p.read_bytes()))
+        sent: list[dict] = []
+        for _ in range(3):
+            with pytest.raises(AcpProcessDied):
+                await _turn(_handle(tmp_path, sent, die_after_write=True), f"see {p}")
+        await _turn(_handle(tmp_path, sent), f"see {p}")
+        assert all([b["type"] for b in s["prompt"]] == ["text", "image"] for s in sent)
+        ledger = sm.get_image_ledger("dashboard:1")
+        assert ledger["uncertain_bytes"] == 3 * size and ledger["b64_bytes"] == 4 * size
+        # A compaction refunds only what the records describe; the uncertain
+        # copies stay charged, since no compaction can say whether the replay
+        # carries them.
+        compacted = compact_ledger(ledger)
+        assert compacted["b64_bytes"] == 4 * size and compacted["uncertain_bytes"] == 3 * size
+        await sm.aclose()
+
+    @pytest.mark.asyncio
+    async def test_an_unconfirmed_write_survives_reload_and_the_next_writer_invalidates_it(
+        self, tmp_path, patched_map
+    ):
+        first = SessionMap()
+        first.set("dashboard:1", SID)
+        image_ledger.set_image_ledger_store(first)
+        p = _png(tmp_path, "shot.png")
+        size = len(base64.b64encode(p.read_bytes()))
+        sent: list[dict] = []
+        with pytest.raises(AcpProcessDied):
+            await _turn(_handle(tmp_path, sent, die_after_write=True), f"see {p}")
+        await first.aclose()  # the gateway restarts: the deferred flush had landed
+        second = SessionMap()
+        image_ledger.set_image_ledger_store(second)
+        reloaded = second.get_image_ledger("dashboard:1")
+        assert reloaded["unconfirmed"] is not None and reloaded["b64_bytes"] == size
+        assert normalize_ledger(json.loads(json.dumps(reloaded))) == reloaded
+        await _turn(_handle(tmp_path, sent), f"see {p}")
+        assert [b["type"] for b in sent[1]["prompt"]] == ["text", "image"]
+        after = second.get_image_ledger("dashboard:1")
+        assert after["unconfirmed"] is None and after["uncertain_bytes"] == size
+        await second.aclose()
+
+    @pytest.mark.asyncio
+    async def test_an_unaccepted_prompt_does_not_advance_the_retention_walk(self, tmp_path):
+        """Two records sit within the kept pairs. A text prompt whose runtime died
+        unconfirmed, then its retry, must move them ONE position -- the retry's
+        -- never two, or the older picture would face the walk a prompt early."""
+        p1, p2 = _png(tmp_path, "one.png"), _png(tmp_path, "two.png", seed=2)
+        sent: list[dict] = []
+        handle = _handle(tmp_path, sent)
+        await _turn(handle, f"see {p1}")
+        await _turn(handle, f"see {p2}")
+        assert [e["after"] for e in handle._image_budget._local["recent"]] == [1, 0]
+        dying = _handle(tmp_path, sent, die_after_write=True)
+        dying._image_budget = handle._image_budget
+        with pytest.raises(AcpProcessDied):
+            await _turn(dying, "a long story " * 100)
+        assert [e["after"] for e in handle._image_budget._local["recent"]] == [1, 0], "unknown yet"
+        await _turn(handle, "a long story " * 100)  # the re-queued retry
+        assert [e["after"] for e in handle._image_budget._local["recent"]] == [2, 1]
+
+    @pytest.mark.asyncio
+    async def test_an_error_answer_to_the_prompt_confirms_nothing(self, tmp_path):
+        """The runtime refusing the request is its only frame: the prompt is not in
+        the conversation, so its digests must not become known."""
+        p = _png(tmp_path, "shot.png")
+        size = len(base64.b64encode(p.read_bytes()))
+        sent: list[dict] = []
+        handle = _handle(tmp_path, sent)
+        queue = handle._queue
+        runtime = handle._runtime
+
+        async def refusing(method, params):
+            sent.append(params)
+            queue.put_nowait(
+                JsonRpcMessage.from_dict(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": len(sent),
+                        "error": {"code": -32602, "message": "Invalid params"},
+                    }
+                )
+            )
+            return len(sent)
+
+        runtime.send_request = refusing
+        with pytest.raises(Exception):
+            await _turn(handle, f"see {p}")
+        ledger = handle._image_budget._local
+        assert ledger["unconfirmed"] is not None and ledger["hashes"] == []
+        # The same picture attached again is inlined again, not called sent.
+        runtime.send_request = _handle(tmp_path, sent)._runtime.send_request
+        await _turn(handle, f"see {p}")
+        assert [b["type"] for b in sent[1]["prompt"]] == ["text", "image"]
+        assert handle._image_budget._local["uncertain_bytes"] == size
+
+    @pytest.mark.asyncio
+    async def test_a_compaction_frame_confirms_the_written_prompt_first(self, tmp_path, caps):
+        """The completed compaction kiro-cli reports during the turn is the backend
+        speaking for a conversation that holds the prompt: it counts, then refunds."""
+        p = _png(tmp_path, "shot.png")
+        size = len(base64.b64encode(p.read_bytes()))
+        sent: list[dict] = []
+        handle = _handle(tmp_path, sent, frames=[_compaction_frame()])
+        await _turn(handle, f"see {p}")
+        ledger = handle._image_budget._local
+        assert ledger["unconfirmed"] is None and ledger["uncertain_bytes"] == 0
+        assert ledger["hashes"] == [], "the compaction forgot the digest"
+        assert ledger["b64_bytes"] == size, "the prompt in flight is kept and charged"
+        assert ledger["recent"] == _recent((size, 0, 0))
+
+
+class TestStoreFailures:
+    """``store_image_ledger`` reports a refused write instead of raising; the
+    budget must not lose the charge on that path, and what it cannot save is
+    named, not assumed small."""
+
+    @pytest.mark.asyncio
+    async def test_repeated_refusals_keep_the_charge_in_memory(self, tmp_path, patched_map):
+        """The entry is gone (deleted under a live handle): every durable write is
+        refused, and the ledger lives on the handle for the rest of its life."""
+        sm = SessionMap()
+        sm.set("dashboard:1", SID)
+        image_ledger.set_image_ledger_store(sm)
+        p = _png(tmp_path, "shot.png")
+        size = len(base64.b64encode(p.read_bytes()))
+        sent: list[dict] = []
+        handle = _handle(tmp_path, sent)
+        await _turn(handle, f"see {p}")
+        assert sm.get_image_ledger("dashboard:1")["hashes"], "durable while the entry exists"
+        sm.delete("dashboard:1")
+        assert sm.get_image_ledger("dashboard:1") is None
+        # The record is gone: the next prompts are refused by the store, three
+        # times over, and nothing is lost on the handle.
+        for name, seed in (("two.png", 2), ("three.png", 3), ("four.png", 4)):
+            await _turn(handle, f"see {_png(tmp_path, name, seed=seed)}")
+        assert sm.get_image_ledger("dashboard:1") is None, "no entry was re-materialized"
+        local = handle._image_budget._local
+        assert len(local["hashes"]) == 3 and local["b64_bytes"] == 3 * size
+        await _turn(handle, f"again {_png(tmp_path, 'two.png', seed=2)}")
+        assert [b["type"] for b in sent[-1]["prompt"]] == ["text"], "still deduped in memory"
+        await sm.aclose()
+
+    @pytest.mark.asyncio
+    async def test_flush_failures_leave_a_restart_without_a_ledger(
+        self, tmp_path, patched_map, monkeypatch
+    ):
+        """RESIDUAL, pinned: the ledger shares the session map's durability. A
+        map whose flushes keep failing (disk full, permissions) answers every
+        read from memory, so the live process stays consistent, but the file
+        never learns the ledger: the next process reads NO ledger -- the first
+        image's bytes and every later one's -- and the conversation resumes in
+        the pre-ledger shape. This is bounded by the map's contract, not by one
+        prompt."""
+        sm = SessionMap()
+        sm.set("dashboard:1", SID)
+        await sm.aclose()  # the entry itself is on disk
+        sm = SessionMap()
+        image_ledger.set_image_ledger_store(sm)
+
+        def failing_write(payload: str, seq: int) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(sm, "_write_payload", failing_write)
+        p = _png(tmp_path, "shot.png")
+        sent: list[dict] = []
+        handle = _handle(tmp_path, sent)
+        for name, seed in (("shot.png", 1), ("two.png", 2), ("three.png", 3)):
+            await _turn(handle, f"see {_png(tmp_path, name, seed=seed)}")
+        assert len(sm.get_image_ledger("dashboard:1")["hashes"]) == 3, "live reads are served"
+        await _turn(handle, f"again {p}")
+        assert [b["type"] for b in sent[-1]["prompt"]] == ["text"]
+        with pytest.raises(OSError):
+            await sm.aclose()  # the final flush is where the disk error surfaces
+        restarted = SessionMap()
+        assert restarted.get_image_ledger("dashboard:1") == {}, "nothing reached the file"
 
 
 class TestWithheldNotice:
@@ -1283,11 +2036,22 @@ class TestWithheldNotice:
     only to the model and the log."""
 
     def test_the_notice_names_counts_and_caps_only(self):
-        one = withheld_notice(1)
+        one = withheld_notice(1, refunds_on_compaction=True)
         assert one.startswith("\u26a0\ufe0f One image was not sent to the model")
         assert "20 images or 12 MiB per message, 24 MiB per conversation" in one
         assert "/new" in one
-        assert withheld_notice(3).startswith("\u26a0\ufe0f 3 images were not sent")
+        assert withheld_notice(3, refunds_on_compaction=True).startswith(
+            "\u26a0\ufe0f 3 images were not sent"
+        )
+
+    def test_the_notice_promises_the_refund_only_where_a_compaction_refunds(self):
+        kiro = withheld_notice(1, refunds_on_compaction=True)
+        other = withheld_notice(1, refunds_on_compaction=False)
+        assert "refunded when the conversation is compacted" in kiro
+        assert "refund" not in other and "compact" not in other
+        assert "24 MiB per conversation)." in other
+        assert other.startswith("\u26a0\ufe0f One image was not sent to the model")
+        assert "/new starts a conversation with a fresh budget" in other
 
     @pytest.mark.asyncio
     async def test_commit_reports_the_withheld_count_even_when_nothing_was_charged(self, caps):
@@ -1311,15 +2075,29 @@ class TestWithheldNotice:
         events = [e async for e in handle.prompt(f"see {p}", timeout=3.0)]
         assert [b["type"] for b in sent[0]["prompt"]] == ["text"]
         assert events[0].kind == EVENT_IMAGE_BUDGET
-        assert events[0].text == withheld_notice(1)
+        assert events[0].text == withheld_notice(1, refunds_on_compaction=True)
         assert events[-1].kind == EVENT_COMPLETE
-        # Nothing withheld, nothing said.
+        # A backend whose compaction never refunds is not promised a refund.
+        kas = _handle(tmp_path, sent, acp_backend=ACP_BACKEND_KAS)
+        events = [e async for e in kas.prompt(f"see {p}", timeout=3.0)]
+        assert events[0].kind == EVENT_IMAGE_BUDGET
+        assert events[0].text == withheld_notice(1, refunds_on_compaction=False)
+        assert "compact" not in events[0].text
+        # Nor is a kiro-cli the verified range cannot place -- and the compaction
+        # that follows acts on the same answer the notice gave.
+        newer = _handle(tmp_path, sent, frames=[_compaction_frame()], agent_version=NEWER_VERSION)
+        events = [e async for e in newer.prompt(f"see {p}", timeout=3.0)]
+        assert events[0].text == withheld_notice(1, refunds_on_compaction=False)
         caps(prompt_images=MAX_PROMPT_IMAGE_BLOCKS)
+        # This turn inlines the picture, then carries the completed compaction.
+        await _turn(newer, f"now {p}")
+        assert newer._image_budget._local["hashes"], "kept, as the notice said nothing else"
+        # Nothing withheld, nothing said.
         events = [e async for e in handle.prompt(f"see {p}", timeout=3.0)]
         assert all(e.kind != EVENT_IMAGE_BUDGET for e in events)
         # A repeat is not a loss: the conversation already carries the picture.
         events = [e async for e in handle.prompt(f"again {p}", timeout=3.0)]
-        assert "sent earlier" in sent[2]["prompt"][0]["text"]
+        assert "sent earlier" in sent[-1]["prompt"][0]["text"]
         assert all(e.kind != EVENT_IMAGE_BUDGET for e in events)
 
     @pytest.mark.asyncio
@@ -1330,6 +2108,7 @@ class TestWithheldNotice:
         p = _png(tmp_path, "shot.png")
         client = AcpClient(work_dir=tmp_path, session_key="dashboard:9")
         client._session_id = "s1"
+        client._agent_version = VERIFIED_VERSION
         sent: list[dict] = []
 
         async def send_request(method, params):
@@ -1346,15 +2125,65 @@ class TestWithheldNotice:
         client._prompt_loop = fake_prompt_loop
         events = [e async for e in client.stream_events(f"see {p}")]
         assert [b["type"] for b in sent[0]["prompt"]] == ["text"]
-        assert events[0].kind == EVENT_IMAGE_BUDGET and events[0].text == withheld_notice(1)
+        assert events[0].kind == EVENT_IMAGE_BUDGET
+        assert events[0].text == withheld_notice(1, refunds_on_compaction=True)
         events = [e async for e in client.stream_events("text only")]
         assert all(e.kind != EVENT_IMAGE_BUDGET for e in events)
+        # A kiro-cli the verified range cannot place is promised no refund...
+        client._agent_version = NEWER_VERSION
+        events = [e async for e in client.stream_events(f"see {_png(tmp_path, 'two.png', seed=2)}")]
+        assert events[0].kind == EVENT_IMAGE_BUDGET
+        assert events[0].text == withheld_notice(1, refunds_on_compaction=False)
+        # ...and neither is a backend that never refunds.
+        client._agent_version = VERIFIED_VERSION
+        client._acp_backend = ACP_BACKEND_KAS
+        events = [
+            e async for e in client.stream_events(f"see {_png(tmp_path, 'three.png', seed=3)}")
+        ]
+        assert events[0].kind == EVENT_IMAGE_BUDGET
+        assert events[0].text == withheld_notice(1, refunds_on_compaction=False)
 
 
 class TestResume:
     """After a gateway restart the resumed session is judged by the conversation it
     lands on: the same native conversation still replays the picture, so its
     repeat is deduped; a fresh one does not, so its repeat is inlined."""
+
+    @pytest.mark.asyncio
+    async def test_a_conversation_that_predates_the_ledger_resumes_with_an_empty_one(
+        self, tmp_path, patched_map, caps
+    ):
+        """RESIDUAL, pinned: a session record written before this module existed
+        has no ledger, yet the native conversation it resumes (``session/load``,
+        same sid) may already carry pictures inlined under the old code. The
+        budget cannot see them -- kiro-cli's load replays only text blocks, so
+        nothing on the wire names them -- and so it admits a full allowance on top
+        of them: a picture the conversation already holds is inlined again and
+        charged as if first, and the per-session cap counts from zero. The same
+        shape is reached by any conversation whose entry gains no ledger: a
+        transferred Layer B context window joined to a fresh entry, a kept
+        subagent conversation seeded for continuation after its in-memory
+        ledger died with the run."""
+        sm = SessionMap()
+        sm.set("dashboard:1", SID)  # the legacy record: a sid, no image_ledger field
+        image_ledger.set_image_ledger_store(sm)
+        assert sm.get_image_ledger("dashboard:1") == {}, "no ledger, not an empty one"
+        p = _png(tmp_path, "shot.png")
+        size = len(base64.b64encode(p.read_bytes()))
+        # The conversation already replays shot.png (pre-module turn); nothing
+        # tells the ledger so. The resumed session attaches it again:
+        sent: list[dict] = []
+        await _turn(_handle(tmp_path, sent), f"again {p}")
+        assert [b["type"] for b in sent[0]["prompt"]] == ["text", "image"], "inlined, not deduped"
+        ledger = sm.get_image_ledger("dashboard:1")
+        assert ledger["b64_bytes"] == size, "charged as the first picture of the conversation"
+        # From here on the budget holds: the repeat is deduped and the cap binds.
+        await _turn(_handle(tmp_path, sent), f"once more {p}")
+        assert [b["type"] for b in sent[1]["prompt"]] == ["text"]
+        caps(session_b64=size)
+        await _turn(_handle(tmp_path, sent), f"new {_png(tmp_path, 'two.png', seed=2)}")
+        assert [b["type"] for b in sent[2]["prompt"]] == ["text"], "over the (zero-based) cap"
+        await sm.aclose()
 
     @pytest.mark.asyncio
     async def test_a_restart_that_resumes_the_same_conversation_dedups(self, tmp_path, patched_map):

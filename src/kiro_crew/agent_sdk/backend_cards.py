@@ -58,10 +58,11 @@ projection exists to remove:
 * a new harness still costs no edit here. Every line of every harness this table does
   not name is measured, so onboarding one renders a complete card exactly as before.
 
-``ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD`` is the near miss worth naming, and it stays
-off-card: its answer is KNOWN and version-gated per process, so a pre-session
-projection that holds no version cannot answer it in any of the three levels.
-Unmeasured would say nobody looked, and somebody did.
+``ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD`` and ``ACP_BACKENDS_IMAGE_LEDGER_REFUND`` are
+the near misses worth naming, and they stay off-card: each answer is KNOWN and
+version-gated per process, so a pre-session projection that holds no version cannot
+answer it in any of the three levels. Unmeasured would say nobody looked, and
+somebody did.
 
 The ONE fact that is genuinely graded already carries its own grade:
 :class:`~kiro_crew.agent_sdk.backends.Routing` names five mechanisms and one
@@ -479,12 +480,19 @@ OFF_CARD_SETS: Mapping[str, str] = {
         "while the operator has the gateway switched on"
     ),
     "ACP_BACKENDS_MCP_CONFIG_HOT_RELOAD": (
-        "whether a freshly installed MCP server reaches a RUNNING session. The one "
-        "set whose membership this card cannot honestly project: it is version-gated "
+        "whether a freshly installed MCP server reaches a RUNNING session. A set whose "
+        "membership this card cannot honestly project: it is version-gated "
         "per process by mcp_hot_reload_supported, and a pre-session projection holds "
         "no version -- so an available mark would promise a session the runtime "
         "still resets on a build below that floor, and two levels cannot say "
         "on a recent enough release"
+    ),
+    "ACP_BACKENDS_IMAGE_LEDGER_REFUND": (
+        "whether a compaction gives a conversation its image allowance back. Version-"
+        "gated per process by the ledger's verified kiro-cli release range, and a "
+        "pre-session projection holds no version -- so an available mark would "
+        "promise a refund a build outside that range never makes; the conversation's "
+        "own withheld-image notice says it, per process, where the answer is known"
     ),
 }
 
