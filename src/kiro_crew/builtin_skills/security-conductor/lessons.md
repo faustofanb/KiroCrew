@@ -140,11 +140,14 @@ reads the last section.
   one file failed, not which. Before calling a grant too wide, check each job for
   its own permissions and whether it uses them.
 - **Run `verify_finding.py` only on the filed tree or on main.** Never run it on a
-  fix branch. Use `verify_fix.py` there. Record `fixed` once, from main, after
-  the merge.
+  fix branch. Use `verify_fix.py` there.
+- **Record `fixed` once, after the merge.** Run `verify_finding.py` on main. When
+  it reports `rejected` because the proof now passes, record
+  `ledger.py record-verdict --finding ID --role verifier --verdict fixed --reason "<PR> <merge sha>"`.
 - **Split `rejected` rows by time.** Rows before the fix opened are real
-  refutations. Rows after it that say the proof passed mean the fix holds. Count
-  only the first kind as a disagreement.
+  refutations. A `rejected` row from that main run, saying the proof passed,
+  means the fix holds; the `fixed` row after it records that. Count only the
+  first kind as a disagreement.
 
 ## Scoping a fix
 
@@ -179,17 +182,18 @@ reads the last section.
   as a `policy_block` event with the command shape only. Report it and wait for
   the retrospective's ruling. Never retry the refused call in another form: no
   re-spelling, encoding, splitting, renaming or shortening.
-- **Write calls in the sanctioned shapes from the start.** These are the forms
-  `golden-paths.json` records as legitimate. They are how a call is written
-  before it runs, never a way to retry one that was refused:
+- **Write calls in a safe shape from the start.** These shapes are how a call
+  is written before it runs, never a way to retry one that was refused.
+- **Recorded in `golden-paths.json`:**
+  - Pass prose by file: `git commit -F <file>`, `gh pr comment --body-file <file>`.
+  - Push a literal named branch, with no command substitution on that line.
+- **Recommended (not corpus rows):**
   - Run each script as its own single-purpose command, not one long chain.
   - Write a program to a file and run the file, instead of an inline program.
-  - Pass prose by file: `git commit -F <file>`, `gh pr comment --body-file <file>`.
-  - Push a literal named branch in its own command, with no command substitution
-    on that line. Run guards and `gh pr create` as separate calls.
+  - Run guards and `gh pr create` as separate calls from the push.
   - Write each run's output to a new directory instead of deleting an old one by
     absolute path. Keep deletes out of long chains.
   - Describe a denied command in words in any title, reason or summary. Never
     quote it.
-- **`golden-paths.json` wins.** This list is a reading aid. When it and the JSON
-  corpus disagree, follow the corpus.
+- **`golden-paths.json` wins.** These lists are a reading aid. When they and the
+  JSON corpus disagree, follow the corpus.
