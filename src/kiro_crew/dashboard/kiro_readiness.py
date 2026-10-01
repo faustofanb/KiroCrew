@@ -63,9 +63,32 @@ _clock = time.monotonic
 _VERIFY_MAX_AGE_SECS = 30.0
 
 
+def non_kiro_backend_selected() -> bool:
+    """Whether the configured agent backend is OUTSIDE the kiro-cli family.
+
+    The prerequisite this module gates on is a KIRO-CLI property: the binary,
+    its sign-in, its probe. An install whose agent backend is another harness
+    (praxisd, claude, codex, ...) never spawns kiro-cli on these paths, so the
+    gate has nothing to authorize and must not refuse on its behalf. Read from
+    the loader (same call chat_runner makes per message) so a config change is
+    picked up without a restart beyond the gateway's own snapshot semantics.
+    """
+    from kiro_crew.acp_backends import ACP_BACKEND_KAS, ACP_BACKEND_KIRO
+    from kiro_crew.config import KiroCrewConfig
+
+    try:
+        backend = KiroCrewConfig.load().agent.acp_backend
+    except Exception:
+        logger.debug("backend read failed; prerequisite gate stays in force", exc_info=True)
+        return False
+    return backend not in (ACP_BACKEND_KIRO, ACP_BACKEND_KAS)
+
+
 async def kiro_session_ready(service: object) -> bool:
     """Return the service's latched readiness. Fails closed on a bad service."""
 
+    if non_kiro_backend_selected():
+        return True
     if not isinstance(service, KiroPrerequisiteService):
         return False
     return await service.session_ready()
@@ -89,6 +112,8 @@ async def kiro_verified_ready(service: object) -> bool:
     routes, or several pollers firing together) into one probe.
     """
 
+    if non_kiro_backend_selected():
+        return True
     if not isinstance(service, KiroPrerequisiteService):
         return False
     return await service.verified_ready(max_age_secs=_VERIFY_MAX_AGE_SECS)

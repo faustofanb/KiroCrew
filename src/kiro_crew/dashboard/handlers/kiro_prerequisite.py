@@ -124,6 +124,30 @@ async def api_kiro_prerequisite_status(request: web.Request) -> web.Response:
         assert denied is not None
         return denied
 
+    # A non-kiro agent backend never runs kiro-cli, so the prerequisite this
+    # endpoint reports on does not apply: answer ready so the first-run gate
+    # passes and no install/sign-in prompt is shown for a CLI the operator
+    # deliberately does not use.
+    from kiro_crew.dashboard.kiro_readiness import non_kiro_backend_selected
+
+    if non_kiro_backend_selected():
+        return web.json_response(
+            {
+                "platform": "gateway",
+                "installed": True,
+                "authenticated": True,
+                "ready": True,
+                "initial_setup_complete": True,
+                "repair_required": False,
+                "docs_url": OFFICIAL_INSTALL_DOCS_URL,
+                "login_command": KIRO_CLI_LOGIN_COMMAND,
+                "sso_login_command": KIRO_CLI_SSO_LOGIN_COMMAND,
+                "bundled_cli": False,
+                "setup_allowed": True,
+                "backend_exempt": True,
+            }
+        )
+
     # Only an owner may force a host probe; a non-owner's refresh reads latched
     # state like any other poll (they receive the redacted payload regardless).
     refresh = request.query.get("refresh")
