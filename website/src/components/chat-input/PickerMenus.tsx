@@ -13,7 +13,7 @@ export function ComposerPickerMenus({ pickers, value, onChange, composerAnchorRe
   pickers: ReturnType<typeof useComposerPickers>
   value: string
   onChange: (v: string) => void
-  composerAnchorRef: React.RefObject<HTMLElement>
+  composerAnchorRef: React.RefObject<HTMLElement | null>
   sendOnEnter: SendMode
   typedCommandMenus: boolean
   project?: string

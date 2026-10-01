@@ -26,15 +26,15 @@ type Ref<V> = MutableRefObject<V>
 
 export interface ScrollerElement {
   scrollerRef: RefObject<HTMLDivElement | null>
-  contentRef: RefObject<HTMLDivElement>
-  topSentinelRef: RefObject<HTMLDivElement>
-  bottomSentinelRef: RefObject<HTMLDivElement>
+  contentRef: RefObject<HTMLDivElement | null>
+  topSentinelRef: RefObject<HTMLDivElement | null>
+  bottomSentinelRef: RefObject<HTMLDivElement | null>
   /** The wrapper around the host's `belowRows` (TranscriptScrollShell renders
    *  it): trailing chrome inside the scroller -- the working footer that mounts
    *  once a reply goes quiet, a survey card, a tail spacer. Observed by the
    *  ResizeObserver so its growth is followed like tail growth; nothing else
    *  sees it (it is not a row, and it leaves the scroller's box alone). */
-  trailingRef: RefObject<HTMLDivElement>
+  trailingRef: RefObject<HTMLDivElement | null>
   leadingOffset: (el: HTMLElement) => number
   /** The scroller node as state, so the element-keyed observers re-attach. */
   scrollerEl: HTMLDivElement | null
@@ -47,7 +47,7 @@ export interface ScrollerElement {
 }
 
 export function useScrollerElement(
-  externalScrollerRef: RefObject<HTMLDivElement | null> | RefObject<HTMLDivElement> | undefined,
+  externalScrollerRef: RefObject<HTMLDivElement | null> | RefObject<HTMLDivElement | null> | undefined,
 ): ScrollerElement {
   // ---- DOM refs ----
   const internalScrollerRef = useRef<HTMLDivElement | null>(null)
@@ -231,7 +231,7 @@ export function useResizeObserver(ctx: {
   scrollerRef: RefObject<HTMLDivElement | null>
   scrollerEl: HTMLDivElement | null
   elIndexRef: Ref<Map<Element, number>>
-  trailingRef: RefObject<HTMLDivElement>
+  trailingRef: RefObject<HTMLDivElement | null>
   resizeObserverRef: Ref<ResizeObserver | null>
   measurement: Pick<RowMeasurement, 'measureResizeEntries' | 'shiftRowTops'>
   compensation: Pick<ShiftCompensation, 'compensateAboveFold'>

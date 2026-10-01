@@ -284,7 +284,7 @@ export function useRowMeasurement<T>(ctx: {
   eagerFirstMeasureRef: Ref<boolean>
   elIndexRef: Ref<Map<Element, number>>
   resizeObserverRef: Ref<ResizeObserver | null>
-  trailingRef: RefObject<HTMLDivElement>
+  trailingRef: RefObject<HTMLDivElement | null>
   heightIndexRef: Ref<HeightIndex | null>
   canMeasure?: () => boolean
   windowRangeRef: Ref<WindowRange>

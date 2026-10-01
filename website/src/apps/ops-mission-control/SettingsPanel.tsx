@@ -524,7 +524,7 @@ function SlackOutCard({
 }
 
 /** Lucide component per channel icon name declared in `app.json`. */
-const CHANNEL_ICONS: Record<string, JSX.Element> = {
+const CHANNEL_ICONS: Record<string, React.JSX.Element> = {
   UserCheck: <UserCheck className="lucide-inline" />,
   Radio: <Radio className="lucide-inline" />,
   Clock: <Clock className="lucide-inline" />,

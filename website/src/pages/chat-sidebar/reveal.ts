@@ -53,7 +53,7 @@ const REVEAL_FLASH_FADE_MS = 500
 
 /** Consumes session and folder reveal requests and flashes the target row. */
 export function useSidebarReveal({ sidebarRootRef, dispatch, localSlots, revealBlockingFilters, staleCollapseMs, sortKey, isStaleExempt, slotFolders, setStaleExpanded, expandFolderAncestors, expandConductorAncestors, folders, setSlotFilter, setFilterHiddenFolders, setRevealForcedVisible, setFlatView }: {
-  sidebarRootRef: RefObject<HTMLDivElement>
+  sidebarRootRef: RefObject<HTMLDivElement | null>
   dispatch: AppDispatch
   localSlots: Slot[]
   revealBlockingFilters: RevealBlockingFilter[]

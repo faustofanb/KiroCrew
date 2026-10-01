@@ -125,7 +125,7 @@ export interface ShellAsideCopy {
 
 interface OnboardingShellApi {
   // The single persistent dialog element. Flows use it for their focus trap.
-  dialogRef: RefObject<HTMLDivElement>
+  dialogRef: RefObject<HTMLDivElement | null>
   // The persistent right-column <section>; flows portal their header/body/footer
   // into it. Null until the host has mounted the chrome.
   sectionSlot: HTMLElement | null
@@ -257,7 +257,7 @@ export default function OnboardingChapterShell({
   footer?: ReactNode
   // Standalone mode: the dialog element. Inside a host the dialog is host-owned
   // and this ref is unused (the flow reads the host's dialogRef for its trap).
-  dialogRef: RefObject<HTMLDivElement>
+  dialogRef: RefObject<HTMLDivElement | null>
   ariaLabel: string
   children: ReactNode
 }) {

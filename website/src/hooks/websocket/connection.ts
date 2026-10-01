@@ -51,7 +51,7 @@ export interface SocketConnection {
 export function useSocketConnection(): SocketConnection {
   const wsRef = useRef<WebSocket | null>(null)
   const closingRef = useRef(false)  // true when cleanup intentionally closes WS
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>()  // pending reconnect timer
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)  // pending reconnect timer
   const reconnectRef = useRef(RECONNECT_INITIAL_MS)
   const wasConnectedRef = useRef(false)
   const reconnectingRef = useRef(false)  // suppress markSlotUnread during reconnect catch-up

@@ -66,7 +66,7 @@ export function useArtifactLiveReload(
   sourcePath: string | null | undefined,
 ): void {
   const queryClient = useQueryClient()
-  const timerRef = useRef<ReturnType<typeof setTimeout>>()
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
 
   const onChange = useCallback(() => {
     if (!slug) return

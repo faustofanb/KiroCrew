@@ -45,7 +45,7 @@ const makeWrapper = (): {
       mutations: { retry: false },
     },
   })
-  const Wrapper = ({ children }: { children: React.ReactNode }): JSX.Element => (
+  const Wrapper = ({ children }: { children: React.ReactNode }): React.JSX.Element => (
     <QueryClientProvider client={qc}>{children}</QueryClientProvider>
   )
   return { Wrapper, qc }

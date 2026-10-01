@@ -181,7 +181,7 @@ export function ContextUsageControl({ contextPct, contextUsedTokens, contextWind
   modelName?: string
   ctxPopoverOpen: boolean
   setCtxPopoverOpen: (update: (open: boolean) => boolean) => void
-  ctxWrapRef: React.RefObject<HTMLDivElement>
+  ctxWrapRef: React.RefObject<HTMLDivElement | null>
   autoCompactThreshold: ReturnType<typeof useAutoCompactThreshold>
 }) {
   const { autoCompactQuery, autoCompact, autoCompactError, setAutoCompactError, pushAutoCompact } = autoCompactThreshold

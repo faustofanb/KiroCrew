@@ -33,7 +33,7 @@ interface CatalogSkill {
 }
 
 interface Props {
-  anchorRef: React.RefObject<HTMLElement>
+  anchorRef: React.RefObject<HTMLElement | null>
   dropdownRef: React.Ref<HTMLDivElement>
   inputRef: React.Ref<HTMLInputElement>
   filter: string

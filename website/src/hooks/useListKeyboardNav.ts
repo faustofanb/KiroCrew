@@ -125,7 +125,7 @@ export function useListKeyboardNav(opts: UseListKeyboardNavOptions): ListKeyboar
   // insert a file/skill/slash command, dispatch a palette row) against
   // half-composed text. The latch lives in a ref so `onKey` reads the live
   // value without re-subscribing.
-  const imeLatchRef = useRef<ReturnType<typeof createImeLatch>>()
+  const imeLatchRef = useRef<ReturnType<typeof createImeLatch>>(undefined)
   if (!imeLatchRef.current) imeLatchRef.current = createImeLatch()
 
   const move = useCallback((next: number) => {

@@ -18,7 +18,7 @@ interface Props {
   err: string
   /** A client-side check or a not-failed status — plain text, never an error surface. */
   hint: string
-  inputRef: RefObject<HTMLInputElement>
+  inputRef: RefObject<HTMLInputElement | null>
   onPick: (e: React.ChangeEvent<HTMLInputElement>) => void
   onDrop: (e: React.DragEvent) => void
   onDragOver: (e: React.DragEvent) => void

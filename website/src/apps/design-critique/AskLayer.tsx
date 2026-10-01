@@ -13,7 +13,7 @@ interface Props {
   openAskId: string | null
   askDraft: string
   reduceMotion: boolean
-  threadRef: RefObject<HTMLDivElement>
+  threadRef: RefObject<HTMLDivElement | null>
   setOpenAskId: (id: string | null) => void
   setSel: (s: Sel | null) => void
   setAskDraft: (v: string) => void

@@ -45,7 +45,7 @@ export default function SessionColorSwatches({ slotKey, colorIndex, colorHex, on
   const [customOpen, setCustomOpen] = useState(false)
   const [draft, setDraft] = useState(colorHex || '#4f8ef7')
   const lastValidRef = useRef(HEX_RE.test(draft) ? draft : '#4f8ef7')
-  const commitTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const commitTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   // Blur only commits a draft the user actually edited: without this, merely
   // focusing the hex field and clicking away would silently paint the session
   // the seeded placeholder color.

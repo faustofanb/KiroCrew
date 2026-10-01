@@ -27,7 +27,7 @@ export function CodeEditor({
 }) {
   // Pierre owns the buffer during an edit session. Keep its file identity
   // stable for changes it emitted, but reseed on an external source change.
-  const initialRef = useRef<{ key: string; file: { name: string; contents: string; cacheKey: string } }>()
+  const initialRef = useRef<{ key: string; file: { name: string; contents: string; cacheKey: string } }>(undefined)
   const lastEmittedRef = useRef<string | null>(null)
   const lastContentRef = useRef<string | null>(null)
   const seedRef = useRef(0)

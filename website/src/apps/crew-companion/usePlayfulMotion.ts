@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useRef, type RefObject, type MutableRefObject } from 'react'
 
 export function usePlayfulMotion(
-  ref: RefObject<HTMLElement>,
+  ref: RefObject<HTMLElement | null>,
   activeRef: MutableRefObject<boolean>,
   enabledRef?: MutableRefObject<boolean>,
   /**

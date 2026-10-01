@@ -21,7 +21,7 @@ const EditableCodeBlock = memo(function EditableCodeBlock(
   const [editing, setEditing] = useState(false)
   const [copied, setCopied] = useState(false)
   const valueRef = useRef(code)
-  const timerRef = useRef<ReturnType<typeof setTimeout>>()
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   const wrapperRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {

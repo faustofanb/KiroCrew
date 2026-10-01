@@ -342,8 +342,8 @@ export function useWindowEdgeTriggers<T>(ctx: {
   sessionId: string
   scrollerRef: RefObject<HTMLDivElement | null>
   scrollerEl: HTMLDivElement | null
-  topSentinelRef: RefObject<HTMLDivElement>
-  bottomSentinelRef: RefObject<HTMLDivElement>
+  topSentinelRef: RefObject<HTMLDivElement | null>
+  bottomSentinelRef: RefObject<HTMLDivElement | null>
   onTopReachedRef: Ref<(() => void) | undefined>
   itemsRef: Ref<T[]>
   setWindowRange: SetWindowRange

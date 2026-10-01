@@ -142,7 +142,7 @@ const CompactionCard = memo(function CompactionCard({ content, disclosureKey, ke
   // notice, the recycle notice and the ⚠-led auto-compact failure — because the
   // scoring runs before the compaction picks an arm, so a record exists whichever arm
   // it then took. Putting the line in one branch would drop it on the other two.
-  const withKeep = (body: JSX.Element) =>
+  const withKeep = (body: React.JSX.Element) =>
     keep === null ? body : (
       <div className="self-center w-full max-w-full min-w-0 flex flex-col" data-testid="compaction-card-host">
         {body}

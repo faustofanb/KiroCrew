@@ -44,7 +44,7 @@ export function usePasteTokens({ value, onChange, pasteBlocks, onPasteBlocksChan
   onPasteBlocksChange?: (next: PasteBlock[]) => void
   showFullPastes: boolean
   onUploadFiles?: (files: File[]) => void
-  inputRef: React.RefObject<HTMLTextAreaElement>
+  inputRef: React.RefObject<HTMLTextAreaElement | null>
   valueRef: React.MutableRefObject<string>
   valueFromUserRef: React.MutableRefObject<boolean>
   recordCaret: () => void

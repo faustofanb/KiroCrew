@@ -43,7 +43,7 @@ export default function WorldsPopout() {
           transition: 'grid-template-rows 0.5s ease, opacity 0.3s ease',
           flexShrink: 0,
         }}
-        {...(collapsed ? { inert: '' } : {})}
+        {...(collapsed ? { inert: true } : {})}
       >
         <div style={{ overflow: 'hidden' }}>
           <div style={{ display: 'flex', gap: 4, padding: '8px 12px', flexWrap: 'wrap', alignItems: 'center' }}>

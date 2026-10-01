@@ -110,10 +110,10 @@ export interface UseVirtualChatOptions<T> {
    * Optional external scroll container ref. When provided, the hook
    * manages the same DOM element instead of creating a new one. Useful
    * when integrating with existing scroll-management code that owns the
-   * scroller. Accepts both `RefObject<HTMLDivElement>` (non-null) and
+   * scroller. Accepts both `RefObject<HTMLDivElement | null>` (non-null) and
    * `RefObject<HTMLDivElement | null>` (nullable) styles of useRef result.
    */
-  externalScrollerRef?: React.RefObject<HTMLDivElement | null> | React.RefObject<HTMLDivElement>
+  externalScrollerRef?: React.RefObject<HTMLDivElement | null> | React.RefObject<HTMLDivElement | null>
   /**
    * Index of the item currently receiving live content growth (e.g. the
    * streaming assistant message), if any. When set, ResizeObserver-driven
@@ -194,16 +194,16 @@ export interface UseVirtualChatReturn<T> {
   /** Attach to the scroll container (`overflow-y: auto`). */
   scrollerRef: React.RefObject<HTMLDivElement | null>
   /** Attach to the inner content wrapper (sized to totalHeight). */
-  contentRef: React.RefObject<HTMLDivElement>
+  contentRef: React.RefObject<HTMLDivElement | null>
   /** Top sentinel — attach for upward expansion detection. */
-  topSentinelRef: React.RefObject<HTMLDivElement>
+  topSentinelRef: React.RefObject<HTMLDivElement | null>
   /** Bottom sentinel — attach for downward expansion detection. */
-  bottomSentinelRef: React.RefObject<HTMLDivElement>
+  bottomSentinelRef: React.RefObject<HTMLDivElement | null>
   /** Trailing chrome — attach to the wrapper around content rendered BELOW the
    *  rows inside the scroller (a working footer, a survey card). The resize
    *  observer watches it so growth there is followed like tail growth; it is
    *  not a row and never enters the height cache. */
-  trailingRef: React.RefObject<HTMLDivElement>
+  trailingRef: React.RefObject<HTMLDivElement | null>
   /** Items to render — both mounted React components and placeholder rows. */
   virtualItems: VirtualItem<T>[]
   /** Pixel offset of the first virtual item (top spacer height). */

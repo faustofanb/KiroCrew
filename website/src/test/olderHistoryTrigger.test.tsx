@@ -46,7 +46,7 @@ function Harness({ onTopReached, scrollerRef, items }: {
     externalScrollerRef: scrollerRef, onTopReached,
   })
   return (
-    <div ref={scrollerRef as RefObject<HTMLDivElement>} data-scroller>
+    <div ref={scrollerRef as RefObject<HTMLDivElement | null>} data-scroller>
       <div ref={v.topSentinelRef} data-sentinel="top" />
       {v.virtualItems.map((it) => (
         <div key={it.key} data-index={it.index} ref={v.measureRef(it.index)} />
@@ -118,7 +118,7 @@ describe('older-history trigger — virtualizer callback', () => {
         externalScrollerRef: scrollerRef, onTopReached,
       })
       return (
-        <div ref={scrollerRef as RefObject<HTMLDivElement>}>
+        <div ref={scrollerRef as RefObject<HTMLDivElement | null>}>
           {v.virtualItems.map((it) => (
             <div key={it.key} data-index={it.index} ref={v.measureRef(it.index)} />
           ))}

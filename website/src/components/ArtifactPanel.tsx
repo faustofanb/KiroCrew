@@ -266,7 +266,7 @@ export default memo(function ArtifactPanel({ slug, kind, content, onClose, activ
   // otherwise a late firing calls setSubmitting on an unmounted component,
   // which under jsdom teardown throws "window is not defined" (the timer
   // outlives the test environment under --coverage timing).
-  const submitResetTimer = useRef<ReturnType<typeof setTimeout>>()
+  const submitResetTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const submitToChat = useCallback((extraPrompt?: string) => {
     // Bail while offline: the chat send path silently refuses messages in
     // that state, so firing the fake "submitting" spinner would just mislead.
@@ -346,8 +346,8 @@ export default memo(function ArtifactPanel({ slug, kind, content, onClose, activ
   // nested bordered card. Fullscreen keeps the card: there the artifact floats
   // on a full-viewport backdrop and the border is what bounds the document.
   const renderBody = (
-    bodyScrollRef: React.RefObject<HTMLDivElement>,
-    bodyPreviewRef: React.RefObject<HTMLDivElement>,
+    bodyScrollRef: React.RefObject<HTMLDivElement | null>,
+    bodyPreviewRef: React.RefObject<HTMLDivElement | null>,
     layer: typeof fa,
     flush = false,
     // Embedded body only: cross-remount scroll identity, forwarded to

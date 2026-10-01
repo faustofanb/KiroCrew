@@ -192,7 +192,7 @@ export const ContentRenderer = memo(function ContentRenderer({
         />
       )}
       {!isRichType && !editing && isMarkdown && (
-        <div ref={previewRef as React.RefObject<HTMLDivElement>} className={markdownClassName ?? 'msg-content text-sm leading-relaxed'}>
+        <div ref={previewRef as React.RefObject<HTMLDivElement | null>} className={markdownClassName ?? 'msg-content text-sm leading-relaxed'}>
           <BasePathCtx.Provider value={filePath || null}>
             <MarkdownRenderer content={displayContent} sourcePos />
           </BasePathCtx.Provider>
@@ -200,7 +200,7 @@ export const ContentRenderer = memo(function ContentRenderer({
       )}
       {!isRichType && !editing && !isMarkdown && (
         <div
-          ref={previewRef as React.RefObject<HTMLDivElement>}
+          ref={previewRef as React.RefObject<HTMLDivElement | null>}
           className={`relative w-full h-full overflow-hidden ${flush ? '' : 'border border-border rounded-md'}`}
         >
           {/* previewRef is a QUERY root only (TreeWalker / selection

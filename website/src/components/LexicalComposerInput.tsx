@@ -351,7 +351,7 @@ function InteractionPlugin({
   // `isComposing` already false, so the native flags alone cannot identify it.
   // The latch outlives them by the post-composition window; a private
   // flag-and-timer copy here is exactly the drift the ratchet pins.
-  const imeLatchRef = useRef<ReturnType<typeof createImeLatch>>()
+  const imeLatchRef = useRef<ReturnType<typeof createImeLatch>>(undefined)
   if (!imeLatchRef.current) imeLatchRef.current = createImeLatch()
   blocksRef.current = blocks
 

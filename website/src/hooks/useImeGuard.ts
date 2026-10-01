@@ -134,7 +134,7 @@ export function createImeLatch(): ImeLatch {
  * effect.
  */
 export function useDocumentImeLatch(enabled = true): ImeLatch {
-  const latchRef = useRef<ImeLatch>()
+  const latchRef = useRef<ImeLatch>(undefined)
   if (!latchRef.current) latchRef.current = createImeLatch()
   const latch = latchRef.current
   useEffect(() => {
@@ -208,7 +208,7 @@ export function useDocumentImeLatch(enabled = true): ImeLatch {
  *   />
  */
 export function useImeGuard() {
-  const latchRef = useRef<ImeLatch>()
+  const latchRef = useRef<ImeLatch>(undefined)
   if (!latchRef.current) latchRef.current = createImeLatch()
   const latch = latchRef.current
 

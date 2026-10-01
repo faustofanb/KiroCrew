@@ -609,7 +609,7 @@ const CONFIRM_W = 264
 const CONFIRM_EST_H = 180
 
 interface ConfirmPopoverProps {
-  popRef: RefObject<HTMLDivElement>
+  popRef: RefObject<HTMLDivElement | null>
   title: string
   desc: string
   confirmLabel?: string

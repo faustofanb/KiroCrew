@@ -75,7 +75,7 @@ const PapyrusEditor = forwardRef<PapyrusEditorHandle, PapyrusEditorProps>(functi
   // fetch landing, a pull rewriting the file) and re-seeds; a value it did emit
   // is the page echoing back a keystroke and must NOT, or the remount would
   // drop the caret mid-word. Mirrors ContentRenderer's editor session handling.
-  const initialRef = useRef<{ path: string; file: { name: string; contents: string; cacheKey: string } }>()
+  const initialRef = useRef<{ path: string; file: { name: string; contents: string; cacheKey: string } }>(undefined)
   const lastEmittedRef = useRef<string | null>(null)
   const lastValueRef = useRef<string | null>(null)
   const seedRef = useRef(0)

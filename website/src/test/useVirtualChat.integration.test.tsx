@@ -445,7 +445,7 @@ describe('useVirtualChat: smooth-pin guard (GPT MEDIUM round 4)', () => {
   // pin must not leave the guard armed and swallow real user input.
   it('an INSTANT pin does not arm the smooth guard', () => {
     const { el, state } = makeScroller({ scrollTop: 2500, scrollHeight: 3000, clientHeight: 500 })
-    const ref = { current: el } as RefObject<HTMLDivElement>
+    const ref = { current: el } as RefObject<HTMLDivElement | null>
     const { result } = renderHook(() =>
       useVirtualChat<Item>({
         items: mkItems(30),
@@ -484,7 +484,7 @@ describe('useVirtualChat: smooth-pin guard (GPT MEDIUM round 4)', () => {
         // steps below, which is exactly the frame sequence the guard reads.
         if (o.behavior !== 'smooth') state.scrollTop = o.top
       }
-    const ref = { current: el } as RefObject<HTMLDivElement>
+    const ref = { current: el } as RefObject<HTMLDivElement | null>
     const { result } = renderHook(() =>
       useVirtualChat<Item>({
         items: mkItems(30),
@@ -611,7 +611,7 @@ describe('useVirtualChat: smooth-pin guard (GPT MEDIUM round 4)', () => {
         behaviors.push(o.behavior)
         if (o.behavior !== 'smooth') state.scrollTop = o.top
       }
-    const ref = { current: el } as RefObject<HTMLDivElement>
+    const ref = { current: el } as RefObject<HTMLDivElement | null>
     const base = {
       items: mkItems(30),
       getKey,
@@ -729,7 +729,7 @@ describe('useVirtualChat: OffsetIndex is rebuilt on session switch (GPT MEDIUM)'
     seedHeights('offidx-a', N, 100)
     seedHeights('offidx-b', N, 500)
     const { el } = makeScroller({ scrollTop: 0, scrollHeight: 1000, clientHeight: 500 })
-    const ref = { current: el } as RefObject<HTMLDivElement>
+    const ref = { current: el } as RefObject<HTMLDivElement | null>
     const { result, rerender } = renderHook(
       ({ sid }: { sid: string }) =>
         useVirtualChat<Item>({
@@ -792,7 +792,7 @@ describe('useVirtualChat: height-cache eviction cap is wired to the row count', 
   // pass even with the cap left at the floor (a vacuous test).
   const mountMeasureUnmount = (sessionId: string, n: number) => {
     const { el } = makeScroller({ scrollTop: 0, scrollHeight: 1000, clientHeight: 500 })
-    const ref = { current: el } as RefObject<HTMLDivElement>
+    const ref = { current: el } as RefObject<HTMLDivElement | null>
     const { result, unmount } = renderHook(() =>
       useVirtualChat<Item>({
         items: mkItems(n),
@@ -901,7 +901,7 @@ describe('useVirtualChat: scroll-anchor preservation (T4/#5)', () => {
       items, sessionId: 'anchor', getKey, overscan: 2, externalScrollerRef: scrollerRef,
     })
     return (
-      <div ref={scrollerRef as RefObject<HTMLDivElement>} data-scroller>
+      <div ref={scrollerRef as RefObject<HTMLDivElement | null>} data-scroller>
         <div ref={v.topSentinelRef} data-sentinel="top" />
         <div data-spacer="before" style={{ height: v.offsetBefore }} />
         {v.virtualItems.map((it) => (

@@ -122,8 +122,10 @@ describe('LexicalComposerInput', () => {
     const host = chip.parentElement as HTMLElement
     const rect = { left: 42, top: 18, right: 142, bottom: 38, width: 100, height: 20, x: 42, y: 18, toJSON: () => ({}) }
     vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(rect as DOMRect)
-    fireEvent.mouseEnter(chip)
-    await vi.advanceTimersByTimeAsync(300)
+    await act(async () => {
+      fireEvent.mouseEnter(chip)
+      await vi.advanceTimersByTimeAsync(300)
+    })
     const preview = screen.getByTestId('lexical-paste-preview-1')
     expect(preview).toHaveStyle({ left: '42px', top: '42px' })
   })

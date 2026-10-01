@@ -9,7 +9,7 @@ import type { Slot } from './types'
 
 /** The rendered row order for the chat-jump shortcuts and its digit badges. */
 export function useShortcutOrder({ sidebarRootRef, dispatch, localSlots }: {
-  sidebarRootRef: RefObject<HTMLDivElement>
+  sidebarRootRef: RefObject<HTMLDivElement | null>
   dispatch: AppDispatch
   localSlots: Slot[]
 }) {

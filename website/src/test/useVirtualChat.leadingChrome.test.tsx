@@ -24,7 +24,7 @@ function Harness({ items, scrollerRef, headChrome, runActive }: {
     items, sessionId: 'lead', getKey, overscan: 2, externalScrollerRef: scrollerRef, runActive,
   })
   return (
-    <div ref={scrollerRef as RefObject<HTMLDivElement>} data-scroller>
+    <div ref={scrollerRef as RefObject<HTMLDivElement | null>} data-scroller>
       {headChrome > 0 && <div data-chrome="head" style={{ height: headChrome }} />}
       <div ref={v.topSentinelRef} data-sentinel="top" />
       <div data-spacer="before" style={{ height: v.offsetBefore }} />

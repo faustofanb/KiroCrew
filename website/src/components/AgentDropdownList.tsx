@@ -36,7 +36,7 @@ function AgentButton({ a, active, isDefault, showSource, activeRef, onSelect, fi
   /** The flat (name-only) list tells rows apart by origin; the grouped list
    *  already says what a row IS in its header, so the badge is noise there. */
   showSource: boolean
-  activeRef: React.RefObject<HTMLButtonElement>
+  activeRef: React.RefObject<HTMLButtonElement | null>
   onSelect: (name: string, kind?: AgentItemKind) => void
   filter?: string
 }) {

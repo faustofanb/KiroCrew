@@ -29,10 +29,13 @@ export function usePhoneSubState(
   return { expanded, toggle }
 }
 
-export interface PhoneSubTriggerDivProps extends React.HTMLAttributes<HTMLDivElement> {
+/** React 19 把 onToggle 规范化为 ToggleEvent 处理器；内部合成一个恒定事件供切换调用。 */
+const SYNTHETIC_TOGGLE_EVENT = {} as React.ToggleEvent<HTMLDivElement>
+
+export interface PhoneSubTriggerDivProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'onToggle'> {
   inset?: boolean
   expanded: boolean
-  onToggle: () => void
+  onToggle: React.ToggleEventHandler<HTMLDivElement>
 }
 
 /** Inline trigger row: a `role="button"` div composing caller handlers with the toggle. */
@@ -51,13 +54,13 @@ export const PhoneSubTriggerDiv = React.forwardRef<HTMLDivElement, PhoneSubTrigg
       onClick={(e) => {
         ;(onClick as unknown as React.MouseEventHandler<HTMLDivElement> | undefined)?.(e)
         e.preventDefault()
-        onToggle()
+        onToggle(SYNTHETIC_TOGGLE_EVENT)
       }}
       onKeyDown={(e) => {
         ;(onKeyDown as unknown as React.KeyboardEventHandler<HTMLDivElement> | undefined)?.(e)
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
-          onToggle()
+          onToggle(SYNTHETIC_TOGGLE_EVENT)
         }
       }}
       className={cn(

@@ -148,7 +148,7 @@ export function useTerminalTouchSelection(term: Terminal, enabled: boolean): Ter
   }
   // Pending long-press: the timer handle plus the start point, so onTouchMove
   // can cancel it if the finger travels too far (a scroll, not a press).
-  const pressTimer = useRef<ReturnType<typeof setTimeout>>()
+  const pressTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const pressStart = useRef<{ x: number; y: number; row: number } | null>(null)
   // Set true the moment the long-press timer fires (it committed an endpoint on
   // its own), so onTouchEnd can tell a tap (timer still pending) from the tail

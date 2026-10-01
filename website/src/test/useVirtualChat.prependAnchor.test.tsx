@@ -64,7 +64,7 @@ function Harness({ items, scrollerRef, estimatedHeight }: {
     items, sessionId: 'prepend', getKey, overscan: 2, externalScrollerRef: scrollerRef, estimatedHeight,
   })
   return (
-    <div ref={scrollerRef as RefObject<HTMLDivElement>} data-scroller>
+    <div ref={scrollerRef as RefObject<HTMLDivElement | null>} data-scroller>
       <div ref={v.topSentinelRef} data-sentinel="top" />
       <div data-spacer="before" style={{ height: v.offsetBefore }} />
       {v.virtualItems.map((it) => (
@@ -95,7 +95,7 @@ function PositionalHarness({ items, scrollerRef, estimatedHeight }: {
     items, sessionId: 'prepend-pos', getKey: positionalGetKey, overscan: 2, externalScrollerRef: scrollerRef, estimatedHeight,
   })
   return (
-    <div ref={scrollerRef as RefObject<HTMLDivElement>} data-scroller>
+    <div ref={scrollerRef as RefObject<HTMLDivElement | null>} data-scroller>
       <div ref={v.topSentinelRef} data-sentinel="top" />
       <div data-spacer="before" style={{ height: v.offsetBefore }} />
       {v.virtualItems.map((it) => (
@@ -310,7 +310,7 @@ describe('useVirtualChat: prepend compensation (load older history)', () => {
         getStableId: (it: Item) => it.id,
       })
       return (
-        <div ref={scrollerRef as RefObject<HTMLDivElement>} data-scroller>
+        <div ref={scrollerRef as RefObject<HTMLDivElement | null>} data-scroller>
           <div ref={v.topSentinelRef} data-sentinel="top" />
           <div data-spacer="before" style={{ height: v.offsetBefore }} />
           {v.virtualItems.map((it) => (

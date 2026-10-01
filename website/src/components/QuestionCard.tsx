@@ -158,7 +158,7 @@ function QuestionCard({ questions, onSubmit, onDismiss, busy = false, onDraftCha
      to happen after React has re-rendered the arrows, not before. */
   const prevArrowRef = useRef<HTMLButtonElement>(null)
   const nextArrowRef = useRef<HTMLButtonElement>(null)
-  const goToHandingFocus = (next: number, receiver: RefObject<HTMLButtonElement>) => {
+  const goToHandingFocus = (next: number, receiver: RefObject<HTMLButtonElement | null>) => {
     flushSync(() => goTo(next))
     receiver.current?.focus()
   }

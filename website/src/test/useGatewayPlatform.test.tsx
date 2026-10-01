@@ -30,16 +30,16 @@ const makeClient = (): QueryClient =>
   })
 
 const wrapperFor = (qc: QueryClient): React.FC<{ children: React.ReactNode }> =>
-  ({ children }): JSX.Element => <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+  ({ children }): React.JSX.Element => <QueryClientProvider client={qc}>{children}</QueryClientProvider>
 
 /** Stands in for the prerequisite gate: the owner of the query. */
-const GateOwner = ({ queryFn }: { queryFn: () => Promise<unknown> }): JSX.Element => {
+const GateOwner = ({ queryFn }: { queryFn: () => Promise<unknown> }): React.JSX.Element => {
   const { data } = useQuery({ queryKey: PREREQUISITE_KEY, queryFn })
   const platform = (data as { platform?: string } | undefined)?.platform
   return <div>owner:{platform ?? 'pending'}</div>
 }
 
-const PlatformReader = (): JSX.Element => <div>reader:{useGatewayPlatform()}</div>
+const PlatformReader = (): React.JSX.Element => <div>reader:{useGatewayPlatform()}</div>
 
 /** Keeps the owner mounted across rerenders so only the reader is newly added. */
 const Harness = ({
@@ -48,7 +48,7 @@ const Harness = ({
 }: {
   queryFn: () => Promise<unknown>
   withReader: boolean
-}): JSX.Element => (
+}): React.JSX.Element => (
   <>
     <GateOwner queryFn={queryFn} />
     {withReader ? <PlatformReader /> : null}

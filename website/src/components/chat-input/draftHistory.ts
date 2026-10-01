@@ -53,7 +53,7 @@ export function usePromptHistory() {
     sentMessages: PromptHistoryItem[]
     current: string
     onChange: (v: string) => void
-    inputRef: React.RefObject<HTMLTextAreaElement>
+    inputRef: React.RefObject<HTMLTextAreaElement | null>
   }) => {
     const ta = e.currentTarget
     const cur = current
@@ -111,7 +111,7 @@ export function useUndoHistory({ value, pasteBlocks, autoFocusKey, composerContr
   onPasteBlocksChange?: (next: PasteBlock[]) => void
   onRemoveFile?: (path: string) => void
   onRemoveDir?: (path: string) => void
-  inputRef: React.RefObject<HTMLTextAreaElement>
+  inputRef: React.RefObject<HTMLTextAreaElement | null>
   ime: ReturnType<typeof useImeGuard>
 }) {
   // --- Prompt undo/redo history (per slot) ---

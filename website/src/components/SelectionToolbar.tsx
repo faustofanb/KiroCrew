@@ -1241,7 +1241,7 @@ const COMPOSER_MAX_INPUT_H = 160
  * Enter handler moves focus here.
  */
 function ComposerBox({ inputRef, autoFocus, actions, copiedId, hintIdBase, onAction, onSubmit, onEscape, onCopyShortcut, onGrow, text, onTextChange, copyFailed, onDismissCopyFailed, submitting, submitFailed, onDismissSubmitFailed }: {
-  inputRef: React.RefObject<HTMLTextAreaElement>
+  inputRef: React.RefObject<HTMLTextAreaElement | null>
   autoFocus: boolean
   actions: SelectionAction[]
   copiedId: string | null

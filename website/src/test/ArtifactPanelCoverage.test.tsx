@@ -126,9 +126,9 @@ interface StubComposer {
 // The stub exposes what the panel wires into the toolbar: the host actions,
 // the layer's composer (a submit button drives it), and the bridge selection
 // it is handed as `externalSelection`.
-const toolbarContainers: React.RefObject<HTMLElement>[] = []
+const toolbarContainers: React.RefObject<HTMLElement | null>[] = []
 vi.mock('../components/SelectionToolbar', () => ({
-  default: ({ actions, composer, externalSelection, containerRef }: { actions: StubAction[]; composer?: StubComposer; externalSelection?: { text: string } | null; containerRef: React.RefObject<HTMLElement> }) => {
+  default: ({ actions, composer, externalSelection, containerRef }: { actions: StubAction[]; composer?: StubComposer; externalSelection?: { text: string } | null; containerRef: React.RefObject<HTMLElement | null> }) => {
     toolbarContainers.push(containerRef)
     return (
     <div data-testid="selection-toolbar" data-external-selection={externalSelection?.text ?? ''} data-has-composer={String(!!composer)}>

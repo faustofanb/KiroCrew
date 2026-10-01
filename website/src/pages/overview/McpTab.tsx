@@ -378,7 +378,7 @@ export default function McpTab({ onManagedProviderClick }: McpTabProps = {}) {
   // unmount so a pending setTimeout never fires a state update after the
   // component is gone — that throws "window is not defined" once the test
   // environment (jsdom) is torn down and fails the build.
-  const applyMsgTimer = useRef<ReturnType<typeof setTimeout>>()
+  const applyMsgTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   useEffect(
     () => () => {
       clearTimeout(applyMsgTimer.current)

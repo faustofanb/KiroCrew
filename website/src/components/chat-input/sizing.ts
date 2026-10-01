@@ -196,7 +196,7 @@ function applyHeight(
 /** Drag-to-resize: the persisted preference, the pointer drag on the resize
  *  handle and its double-click reset, and the wrapper height they drive. */
 export function useManualHeight({ wrapperRef, pendingFilesCount, pendingSessionsCount }: {
-  wrapperRef: React.RefObject<HTMLDivElement>
+  wrapperRef: React.RefObject<HTMLDivElement | null>
   pendingFilesCount: number
   pendingSessionsCount: number
 }) {
@@ -385,8 +385,8 @@ export function useStripHeights({ pendingFilesCount, pendingDirsCount, hasSessio
  *  mirror's scroll sync that follows one. Takes `textareaParked` from the voice
  *  hooks, which is why the composer calls this after them. */
 export function useTextareaAutosize({ inputRef, mirrorRef, value, prefillHint, manualHeight, dragging, textareaParked, activePlaceholder }: {
-  inputRef: React.RefObject<HTMLTextAreaElement>
-  mirrorRef: React.RefObject<HTMLDivElement>
+  inputRef: React.RefObject<HTMLTextAreaElement | null>
+  mirrorRef: React.RefObject<HTMLDivElement | null>
   value: string
   prefillHint?: boolean
   manualHeight: number | null

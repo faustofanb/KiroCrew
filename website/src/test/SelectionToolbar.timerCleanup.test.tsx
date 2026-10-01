@@ -36,7 +36,7 @@ function mount() {
   const view = render(
     createElement('div', { ref: containerRef },
       createElement(SelectionToolbar, {
-        containerRef: containerRef as React.RefObject<HTMLElement>,
+        containerRef: containerRef as React.RefObject<HTMLElement | null>,
         actions: ACTIONS,
       }),
     ),

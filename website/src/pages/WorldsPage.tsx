@@ -38,7 +38,7 @@ export default function WorldsPage() {
           position: 'relative',
           zIndex: 10,
         }}
-        {...(collapsed ? { inert: '' } : {})}
+        {...(collapsed ? { inert: true } : {})}
       >
         <div style={{ overflow: 'hidden' }}>
         <div className="px-4 md:px-6 pt-2 pb-2">

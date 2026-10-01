@@ -213,7 +213,7 @@ export function collapseMenuRowElement(onCollapse: () => void) {
  * neither gets a sentence that is both.
  */
 export function CollapsedComposerBar({ collapsedBarRef, expandComposer, collapsedDraftLine }: {
-  collapsedBarRef: React.RefObject<HTMLButtonElement>
+  collapsedBarRef: React.RefObject<HTMLButtonElement | null>
   expandComposer: () => void
   collapsedDraftLine: string
 }) {

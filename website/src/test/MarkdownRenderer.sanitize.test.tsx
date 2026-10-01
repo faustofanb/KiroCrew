@@ -178,7 +178,7 @@ describe('rehypeSanitize allowlist (React #290 fix)', () => {
 
 describe('MessageErrorBoundary (per-message containment)', () => {
   // A component that always throws on render
-  function CrashingChild(): JSX.Element {
+  function CrashingChild(): React.JSX.Element {
     throw new Error('Simulated render crash')
   }
 

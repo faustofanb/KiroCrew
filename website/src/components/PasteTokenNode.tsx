@@ -15,7 +15,6 @@ import {
   type NodeKey,
   type SerializedLexicalNode,
 } from 'lexical'
-import type { JSX } from 'react'
 import PastePreviewTooltip from './PastePreviewTooltip'
 import { PREVIEW_MAX_HEIGHT, PREVIEW_OPEN_DELAY_MS } from './pastePreviewConstants'
 import { formatToken, type PasteBlock } from '../utils/pasteTokens'
@@ -128,7 +127,7 @@ function PasteTokenChip({ block, nodeKey }: { block: PasteBlock; nodeKey: NodeKe
   )
 }
 
-export class PasteTokenNode extends DecoratorNode<JSX.Element> {
+export class PasteTokenNode extends DecoratorNode<React.JSX.Element> {
   __block: PasteBlock
 
   static getType(): string {
@@ -169,7 +168,7 @@ export class PasteTokenNode extends DecoratorNode<JSX.Element> {
     return false
   }
 
-  decorate(_editor: LexicalEditor, _config: EditorConfig): JSX.Element {
+  decorate(_editor: LexicalEditor, _config: EditorConfig): React.JSX.Element {
     return <PasteTokenChip block={this.__block} nodeKey={this.__key} />
   }
 

@@ -137,7 +137,7 @@ export default function TerminalKeyBar({ term }: { term: Terminal }) {
   // first-run) with no visible remedy.
   type BarStatus = { kind: 'paste'; key: PasteError } | { kind: 'copy'; key: CopyStatus }
   const [barStatus, setBarStatus] = useState<BarStatus | null>(null)
-  const barTimer = useRef<ReturnType<typeof setTimeout>>()
+  const barTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   // Derived per-key views keep the render sites reading naturally.
   const pasteError = barStatus?.kind === 'paste' ? barStatus.key : null
   const copyStatus = barStatus?.kind === 'copy' ? barStatus.key : null

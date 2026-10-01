@@ -118,7 +118,7 @@ export function useComposerKeyDown({ rawPasteRef, handleUndoKey, handleTokenKey,
   anyPickerOpenRef: React.RefObject<boolean>
   promptHistory: ReturnType<typeof usePromptHistory>
   valueRef: React.MutableRefObject<string>
-  inputRef: React.RefObject<HTMLTextAreaElement>
+  inputRef: React.RefObject<HTMLTextAreaElement | null>
 }) {
   return useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Cmd/Ctrl+Shift+V (or Cmd+Option+Shift+V on macOS) → next paste inserts
@@ -226,7 +226,7 @@ export function useEditorInput({ onChange, valueFromUserRef, openPickersForText,
   valueFromUserRef: React.MutableRefObject<boolean>
   openPickersForText: (text: string, before: string) => void
   recordCaret: () => void
-  lexicalControlRef: React.RefObject<ComposerControl>
+  lexicalControlRef: React.RefObject<ComposerControl | null>
   voiceCaretRef: Partial<ComposerVoiceInputProps>['voiceCaretRef']
 }) {
   const handleTextareaChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {

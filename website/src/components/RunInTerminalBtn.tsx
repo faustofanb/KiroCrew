@@ -37,8 +37,8 @@ function stripPromptChars(code: string): string {
 export default function RunInTerminalBtn({ code, lang }: { code: string; lang?: string }) {
   const [status, setStatus] = useState<'idle' | 'sent' | 'error'>('idle')
   const [pending, setPending] = useState<{ command: string; warnReason: string } | null>(null)
-  const flashTimerRef = useRef<ReturnType<typeof setTimeout>>()
-  const resultTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const resultTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   const resultUnsubRef = useRef<(() => void) | null>(null)
 
   useEffect(() => () => {

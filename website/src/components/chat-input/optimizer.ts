@@ -21,7 +21,7 @@ export function usePromptOptimizer({ slotId, chatStore, valueRef, pasteBlocks, o
   lexicalComposer: boolean
   lexicalLoadFailed: boolean
   composerControl: () => ComposerControl | null
-  inputRef: React.RefObject<HTMLTextAreaElement>
+  inputRef: React.RefObject<HTMLTextAreaElement | null>
   valueFromUserRef: React.MutableRefObject<boolean>
   /** Written here during render; the undo recorder and the keydown handler read it. */
   optimizingRef: React.MutableRefObject<boolean>

@@ -24,7 +24,7 @@ function Harness({ items, scrollerRef, tailChrome = 0 }: {
     items, sessionId: 'watchdog', getKey, overscan: 2, externalScrollerRef: scrollerRef,
   })
   return (
-    <div ref={scrollerRef as RefObject<HTMLDivElement>} data-scroller>
+    <div ref={scrollerRef as RefObject<HTMLDivElement | null>} data-scroller>
       <div ref={v.topSentinelRef} data-sentinel="top" />
       <div data-spacer="before" style={{ height: v.offsetBefore }} />
       {v.virtualItems.map((it) => (
