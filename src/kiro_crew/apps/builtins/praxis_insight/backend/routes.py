@@ -15,6 +15,8 @@ governance surface an app token can drive is not governance.
 """
 from __future__ import annotations
 
+import json
+
 import logging
 from functools import wraps
 
@@ -286,6 +288,130 @@ async def _git_fork_close(request: web.Request) -> web.Response:
         return _json({"error": "no such fork", "code": "not_found"}, 404)
 
 
+# ── DBX 数据库工作台（AI 支持）──
+
+@_guarded
+async def _dbx_status(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import dbx
+
+    try:
+        conns = await asyncio.to_thread(dbx.connections)
+        return _json({"available": True, **conns})
+    except PermissionError as exc:
+        return _json({"available": False, "error": str(exc), "connections": []})
+    except RuntimeError as exc:
+        return _json({"available": True, "error": str(exc), "connections": []})
+
+
+@_guarded
+async def _dbx_schema(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import dbx
+
+    conn = request.query.get("connection", "")
+    name = request.query.get("schema")
+    try:
+        return _json(await asyncio.to_thread(dbx.schema, conn, name))
+    except (ValueError, RuntimeError) as exc:
+        return _json({"error": str(exc), "code": "dbx_error"}, 409)
+
+
+@_guarded
+async def _dbx_query(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import dbx
+
+    body = await request.json() if request.can_read_body else {}
+    try:
+        return _json(
+            await asyncio.to_thread(
+                dbx.query,
+                body.get("connection", ""),
+                body.get("sql", ""),
+                bool(body.get("allowWrites", False)),
+                int(body.get("limit", 200)),
+            )
+        )
+    except ValueError as exc:
+        return _json({"error": str(exc), "code": "bad_request"}, 400)
+    except PermissionError as exc:
+        return _json({"error": str(exc), "code": "write_gate"}, 403)
+    except RuntimeError as exc:
+        return _json({"error": str(exc), "code": "dbx_error"}, 409)
+
+
+@_guarded
+async def _dbx_register_mcp(request: web.Request) -> web.Response:
+    """Register @dbx-app/mcp-server via the gateway's own /api/mcp/custom."""
+    import asyncio
+    import urllib.error
+    import urllib.request
+
+    from . import dbx
+
+    body = await request.json() if request.can_read_body else {}
+    mode = body.get("permissionMode", "read_only")
+    try:
+        reg = await asyncio.to_thread(dbx.register_mcp, mode)
+    except (ValueError, FileNotFoundError) as exc:
+        return _json({"error": str(exc), "code": "bad_request"}, 400)
+
+    # Same-process hop to the gateway's own contract keeps the auth rules in
+    # one place; the dashboard token riding this request authorizes it. The
+    # port is taken from the request's own Host header (the gateway serving
+    # THIS request), so dev/prod ports both work.
+    host = request.host
+    base = f"http://{host}"
+    token = request.query.get("token", "")
+    payload = json.dumps({"servers": {reg["name"]: reg["spec"]}, "enable": True}).encode()
+    req = urllib.request.Request(
+        f"{base}/api/mcp/custom?token={token}",
+        data=payload,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    def _post() -> dict:
+        # MUST run in a thread: a synchronous urlopen on the event loop is a
+        # loop stall, and the loop watchdog kills a silent gateway at 15s —
+        # measured live. asyncio.to_thread keeps the loop turning.
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode())
+
+    try:
+        result = await asyncio.to_thread(_post)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode()[:400]
+        if exc.code == 409 and "already in use" in detail:
+            # Idempotent: an existing registration of the same name is success
+            # for the operator's purpose (the tools are mounted for the agent).
+            return _json({"registered": reg["name"], "permissionMode": mode, "alreadyRegistered": True})
+        return _json({"error": f"mcp registration failed: {exc.code} {detail}", "code": "mcp_error"}, 502)
+    except Exception as exc:
+        return _json({"error": f"mcp registration failed: {exc}", "code": "mcp_error"}, 502)
+    return _json({"registered": reg["name"], "permissionMode": mode, "result": result})
+
+
+@_guarded
+async def _dbx_ai(request: web.Request) -> web.Response:
+    """Natural-language → SQL: return the seeded prompt (the UI launches chat with it)."""
+    import asyncio
+
+    from . import dbx
+
+    body = await request.json() if request.can_read_body else {}
+    try:
+        payload = await asyncio.to_thread(dbx.ai_prompt, body.get("connection", ""), body.get("question", ""))
+    except ValueError as exc:
+        return _json({"error": str(exc), "code": "bad_request"}, 400)
+    except RuntimeError as exc:
+        return _json({"error": str(exc), "code": "dbx_error"}, 409)
+    return _json(payload)
+
+
 def register_routes(app: web.Application) -> None:
     """Register on the gateway's aiohttp Application (single-arg convention)."""
     r = app.router
@@ -306,3 +432,9 @@ def register_routes(app: web.Application) -> None:
     r.add_get(f"{_BASE}/git/forks/{{fork_id}}/diff", _git_fork_diff)
     r.add_post(f"{_BASE}/git/forks/{{fork_id}}/merge", _git_fork_merge)
     r.add_post(f"{_BASE}/git/forks/{{fork_id}}/close", _git_fork_close)
+    # DBX 数据库工作台（AI 支持）
+    r.add_get(f"{_BASE}/dbx/status", _dbx_status)
+    r.add_get(f"{_BASE}/dbx/schema", _dbx_schema)
+    r.add_post(f"{_BASE}/dbx/query", _dbx_query)
+    r.add_post(f"{_BASE}/dbx/register-mcp", _dbx_register_mcp)
+    r.add_post(f"{_BASE}/dbx/ai", _dbx_ai)

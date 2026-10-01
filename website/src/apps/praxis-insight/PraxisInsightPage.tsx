@@ -75,6 +75,7 @@ type GitFork = {
   repoStates: GitForkRepoState[]
 }
 type GitDiff = { repos: { repo: string; stat: string; patch: string }[] }
+type DbxConn = { name: string; type: string }[]
 
 /** One visual treatment per word. No two words share a color — a state that
  *  cannot be told apart at a glance gets collapsed in the operator's head. */
@@ -198,6 +199,67 @@ export default function PraxisInsightPage() {
     post(`/api/apps/praxis-insight/changesets/${id}/sync-fork`, {}, `${id}:sync`, () => {})
   const promote = (id: string, action: 'TEST' | 'PROD' | 'CLOSE') =>
     post(`/api/apps/praxis-insight/deliveries/${id}/promote`, { action }, `${id}:${action}`, () => {})
+
+  // ── DBX 数据库工作台（AI 支持）──
+  const [dbxConns, setDbxConns] = useState<DbxConn | null>(null)
+  const [dbxConn, setDbxConn] = useState('')
+  const [dbxSchema, setDbxSchema] = useState<string | null>(null)
+  const [dbxSql, setDbxSql] = useState('SELECT 1')
+  const [dbxAllowWrites, setDbxAllowWrites] = useState(false)
+  const [dbxRows, setDbxRows] = useState<string | null>(null)
+  const [dbxQuestion, setDbxQuestion] = useState('')
+  const [mcpMode, setMcpMode] = useState('read_only')
+
+  const dbxRefresh = useCallback(() => {
+    fetch('/api/apps/praxis-insight/dbx/status')
+      .then((r) => r.json())
+      .then((d) => { setDbxConns(d.connections ?? []); if (d.error && d.available) setError(d.error) })
+      .catch(() => setDbxConns([]))
+  }, [])
+  useEffect(() => { dbxRefresh() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const dbxRunSql = () => {
+    setBusy('dbx-query')
+    fetch('/api/apps/praxis-insight/dbx/query', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ connection: dbxConn, sql: dbxSql, allowWrites: dbxAllowWrites }),
+    })
+      .then((r) => (r.ok ? r.json() : r.json().then((b) => Promise.reject(new Error(b.error ?? `HTTP ${r.status}`)))))
+      .then((d) => setDbxRows(JSON.stringify(d.rows, null, 1).slice(0, 30_000)))
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusy(null))
+  }
+  const dbxRegisterMcp = () => {
+    setBusy('dbx-mcp')
+    fetch('/api/apps/praxis-insight/dbx/register-mcp' + window.location.search, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ permissionMode: mcpMode }),
+    })
+      .then((r) => (r.ok ? r.json() : r.json().then((b) => Promise.reject(new Error(b.error ?? `HTTP ${r.status}`)))))
+      .then(() => setError(null))
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusy(null))
+  }
+  const dbxAskAi = () => {
+    if (!dbxQuestion.trim()) { setError('先输入自然语言问题'); return }
+    setBusy('dbx-ai')
+    fetch('/api/apps/praxis-insight/dbx/ai', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ connection: dbxConn, question: dbxQuestion }),
+    })
+      .then((r) => (r.ok ? r.json() : r.json().then((b) => Promise.reject(new Error(b.error ?? `HTTP ${r.status}`)))))
+      .then((d) => { navigator.clipboard?.writeText(d.prompt); setError(null); window.alert('提示词已复制到剪贴板（含库表上下文 + 你的问题）——粘贴到聊天即可让当前 agent（praxisd）生成 SQL，再让它用 dbx 工具执行。') })
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusy(null))
+  }
+  const dbxLoadSchema = () => {
+    if (!dbxConn) return
+    setDbxSchema('loading')
+    fetch(`/api/apps/praxis-insight/dbx/schema?connection=${encodeURIComponent(dbxConn)}`)
+      .then((r) => r.json())
+      .then((d) => setDbxSchema(JSON.stringify(d.schema, null, 1).slice(0, 20_000)))
+      .catch((e) => { setError(String(e)); setDbxSchema(null) })
+  }
 
   // ── Fork 工作台（真实 git）──
   const [gitRoot, setGitRoot] = useState('')
@@ -391,6 +453,64 @@ export default function PraxisInsightPage() {
             </div>
           ))}
         </div>
+      </section>
+
+      {/* 3.35 DBX 数据库工作台（AI 支持） */}
+      <section className="mb-6">
+        <SectionTitle hint="100+ 数据库 · dbx CLI 直连（凭据留在 dbx）· AI 生成 SQL · MCP 注册给聊天 agent">DBX · 数据库工作台</SectionTitle>
+        {dbxConns === null ? (
+          <p className="text-[12.5px] text-muted">检查 dbx…</p>
+        ) : dbxConns.length === 0 ? (
+          <p className="text-[12.5px] text-muted">dbx 可用但没有已配置的连接——在 DBX 应用里添加连接后刷新。</p>
+        ) : (
+          <>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <select value={dbxConn} onChange={(e) => setDbxConn(e.target.value)} className="h-8 rounded-md border border-border bg-bg px-2 text-[12px] text-text">
+                <option value="">选择连接…</option>
+                {dbxConns.map((c) => (
+                  <option key={c.name} value={c.name}>{c.name} · {c.type}</option>
+                ))}
+              </select>
+              <button className="h-8 rounded-md border border-border px-2.5 text-[12px] text-muted hover:bg-bg-hover" onClick={dbxLoadSchema}>库表结构</button>
+              <div className="ml-auto flex items-center gap-1.5">
+                <select value={mcpMode} onChange={(e) => setMcpMode(e.target.value)} className="h-8 rounded-md border border-border bg-bg px-2 font-mono text-[11px] text-text">
+                  <option value="read_only">read_only</option>
+                  <option value="safe_write">safe_write</option>
+                  <option value="high_risk_write">high_risk_write</option>
+                </select>
+                <button disabled={busy !== null} className="h-8 rounded-md bg-accent px-2.5 text-[12px] text-accent-fg hover:opacity-90 disabled:opacity-40" onClick={dbxRegisterMcp} title="把 @dbx-app/mcp-server 注册为聊天 agent 的 MCP 工具">
+                  {busy === 'dbx-mcp' ? '…' : '注册 MCP 给 AI'}
+                </button>
+              </div>
+            </div>
+            <div className="mb-2 rounded-lg border border-border bg-card p-3">
+              <div className="mb-1.5 flex items-center gap-2">
+                <span className="text-[11.5px] text-muted">SQL</span>
+                <label className="ml-auto flex items-center gap-1 text-[11px] text-muted">
+                  <input type="checkbox" checked={dbxAllowWrites} onChange={(e) => setDbxAllowWrites(e.target.checked)} />
+                  允许写（--allow-writes）
+                </label>
+                <button disabled={busy !== null || !dbxConn} className="rounded-md border border-border px-2.5 py-1 text-[11.5px] text-muted hover:bg-bg-hover disabled:opacity-40" onClick={dbxRunSql}>
+                  {busy === 'dbx-query' ? '执行中…' : '执行'}
+                </button>
+              </div>
+              <textarea value={dbxSql} onChange={(e) => setDbxSql(e.target.value)} rows={3} className="w-full resize-none rounded border border-border bg-bg p-2 font-mono text-[11.5px] text-text outline-none" />
+              {dbxRows && <pre className="mt-2 max-h-64 overflow-auto rounded border border-border bg-bg p-2 font-mono text-[10.5px] leading-5">{dbxRows}</pre>}
+            </div>
+            <div className="rounded-lg border border-border bg-card p-3">
+              <div className="mb-1.5 flex items-center gap-2">
+                <span className="text-[11.5px] text-muted">AI · 自然语言提问</span>
+                <button disabled={busy !== null || !dbxConn} className="ml-auto rounded-md bg-accent px-2.5 py-1 text-[11.5px] text-accent-fg hover:opacity-90 disabled:opacity-40" onClick={dbxAskAi} title="携带库表上下文构建提示词，交给当前聊天 agent 生成并执行 SQL">
+                  {busy === 'dbx-ai' ? '生成中…' : '生成提示词给 AI'}
+                </button>
+              </div>
+              <input value={dbxQuestion} onChange={(e) => setDbxQuestion(e.target.value)} placeholder="例如：最近 7 天下单最多的 10 个用户" className="h-8 w-full rounded border border-border bg-bg px-2 text-[12px] text-text outline-none placeholder:text-muted" />
+            </div>
+            {dbxSchema && (
+              <pre className="mt-2 max-h-72 overflow-auto rounded border border-border bg-bg p-2 font-mono text-[10.5px] leading-5">{dbxSchema === 'loading' ? '加载中…' : dbxSchema}</pre>
+            )}
+          </>
+        )}
       </section>
 
       {/* 3.4 Fork 工作台（真实 git 操作） */}
