@@ -19,7 +19,7 @@ import json
 import logging
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
@@ -871,6 +871,103 @@ def parse_claude_compaction_notice(chunk: str) -> tuple[str, str] | None:
     if text.startswith(reason_prefix):
         return "failed", text[len(reason_prefix) :].strip().rstrip(".")
     return None
+
+
+#: How many launch labels one session's record keeps for the recycle notice. A
+#: session can launch any number of background tasks; the notice names the
+#: newest few, and the record stays bounded however many it saw.
+BACKGROUND_LAUNCH_LABELS_MAX = 3
+
+#: Claude Code tools whose asynchronous launch the adapter waits out before it
+#: answers the prompt (``Turn.deferredSettle`` in claude-agent-acp).
+_HELD_ASYNC_LAUNCH_TOOLS = frozenset({"Agent", "Task"})
+
+
+def parse_background_launch(update: dict[str, Any]) -> str | None:
+    """Name the background work a ``tool_call_update`` reports launching, or None.
+
+    Claude Code runs a backgrounded Bash command or a Workflow in the session's
+    own process tree after the prompt returns, and claude-agent-acp says so on
+    the launching call's structured tool response,
+    ``_meta.claudeCode.toolResponse``: a Bash command carries its
+    ``backgroundTaskId``, and an asynchronous launch (a Workflow) carries
+    ``status: "async_launched"`` with its ``taskId``. Both are structured fields
+    of the harness's own result, never prose, so the parse cannot be steered by
+    what a command printed. Nothing reports the END of that work to a client
+    that has not declared the adapter's AIR extension, which is why this only
+    names a launch. The marker is stamped by the harness's PostToolUse hook,
+    which runs only for a live call, so a ``session/load`` replay cannot set it.
+
+    An asynchronous sub-agent (``Agent`` / ``Task``) reports the same
+    ``async_launched`` status but is not counted: the adapter holds the prompt
+    open until such a sub-agent settles, so the turn is still in flight and the
+    busy semaphore already covers it.
+
+    Returns a short human label for the notice (``workflow "name"`` or
+    ``background command``), or ``None`` for every other frame, including every
+    frame of a harness that stamps no ``claudeCode`` key.
+    """
+    if update.get("sessionUpdate") != UPDATE_TOOL_CALL_UPDATE:
+        return None
+    meta = update.get("_meta")
+    claude = meta.get("claudeCode") if isinstance(meta, dict) else None
+    if not isinstance(claude, dict):
+        return None
+    response = claude.get("toolResponse")
+    if not isinstance(response, dict):
+        return None
+    task_id = response.get("backgroundTaskId")
+    if isinstance(task_id, str) and task_id.strip():
+        return "background command"
+    task_id = response.get("taskId")
+    if claude.get("toolName") in _HELD_ASYNC_LAUNCH_TOOLS:
+        return None
+    if response.get("status") == "async_launched" and isinstance(task_id, str) and task_id.strip():
+        name = response.get("workflowName")
+        if isinstance(name, str) and name.strip():
+            return f'workflow "{redact_text(name.strip())[:80]}"'
+        return "background task"
+    return None
+
+
+@dataclass
+class BackgroundLaunchRecord:
+    """When a session's harness last launched background work, and what it was.
+
+    One per session, owned by whichever transport reads that session's turns
+    (``AcpClient`` and ``AcpSessionHandle`` both keep one, so the two cannot
+    disagree about the capability). ``note`` is called on every session update
+    and is cheap on the miss path. The record is only ever overwritten, never
+    cleared by a later turn: a turn ending says nothing about whether work it
+    did not start has finished.
+    """
+
+    launched_at: float | None = None
+    labels: list[str] = field(default_factory=list)
+
+    def note(self, update: object, now: float) -> bool:
+        """Record *update* if it reports a background launch; True when it did."""
+        if not isinstance(update, dict):
+            return False
+        label = parse_background_launch(update)
+        if label is None:
+            return False
+        self.launched_at = now
+        if label in self.labels:
+            self.labels.remove(label)
+        self.labels.append(label)
+        del self.labels[:-BACKGROUND_LAUNCH_LABELS_MAX]
+        return True
+
+    def age(self, now: float) -> float | None:
+        """Seconds since the newest launch, or ``None`` when there was none."""
+        if self.launched_at is None:
+            return None
+        return max(0.0, now - self.launched_at)
+
+    def describe(self) -> str:
+        """The launched work, newest last, for a user-facing notice."""
+        return ", ".join(self.labels)
 
 
 #: The key codex-acp stamps on ``_meta`` for a context-compaction frame, with a

@@ -1025,6 +1025,10 @@ class AcpSessionProvider(LLMProvider):
         """
         return self._handle.is_turn_active
 
+    def background_launch(self) -> tuple[float, str] | None:
+        """This session's newest background launch, or ``None`` (see LLMProvider)."""
+        return self._handle.background_launch()
+
     def has_unfinished_turn(self) -> bool:
         """True if the native turn has not reached its done boundary —
         INDEPENDENT of cancel state (unlike :meth:`has_active_turn`).

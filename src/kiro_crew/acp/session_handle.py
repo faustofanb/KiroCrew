@@ -30,6 +30,7 @@ from kiro_crew import acp_tool_gate, model_registry, permission_floor
 from kiro_crew.acp import kas_wire
 from kiro_crew.acp._dispatch import (
     DRAIN_YIELD_AFTER_S,
+    BackgroundLaunchRecord,
     build_permission_event,
     classify_notification,
     error_is_refusal_terminal,
@@ -1111,6 +1112,9 @@ class AcpSessionHandle:
         # never resolves, so the ``session/prompt`` request goes unanswered, which
         # leaves this armed for ``_settle_codex_compaction`` at the turn's terminal.
         self._codex_compaction_pending = False
+        # The AcpClient twin (harness-parity H6): when this session's harness
+        # last launched work that outlives the prompt. Never reset per turn.
+        self._background_launches = BackgroundLaunchRecord()
         self._cancelled = False
         # Unresponsive-cancel tracking (mirrors AcpClient._cancel_ts /
         # _cancel_grace_secs). Set by cancel(); the dispatch loop uses them to
@@ -1389,6 +1393,14 @@ class AcpSessionHandle:
         # so a turn on a dead runtime reads inactive -> AcpProvider.cancel() returns
         # "no_turn" instead of firing cancel_session on a corpse.
         return (not self._turn_done.is_set()) and (not self._cancelled) and self._runtime.is_alive()
+
+    def background_launch(self) -> tuple[float, str] | None:
+        """``(seconds since, description)`` of this session's newest background
+        launch, or ``None`` (the twin of ``AcpClient.background_launch``)."""
+        age = self._background_launches.age(time.monotonic())
+        if age is None:
+            return None
+        return age, self._background_launches.describe()
 
     @property
     def has_unfinished_turn(self) -> bool:
@@ -6530,6 +6542,12 @@ class AcpSessionHandle:
                 # long document -- leaves it None. Never a security input.
                 self.last_infra_error = classify_infra_error(ev.tool_output)
         events = filtered_events
+        if self._background_launches.note(update, time.monotonic()):
+            logger.info(
+                "ACP: harness launched background work for session %s: %s",
+                self._session_id,
+                self._background_launches.describe(),
+            )
         compaction_event = self._codex_compaction_event(update)
         if compaction_event is not None:
             # APPENDED, not substituted, and appended to the FILTERED list so the

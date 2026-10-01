@@ -38,6 +38,16 @@ if TYPE_CHECKING:
 #: Caller name on this module's kill-decision audit rows.
 _SWEEP = "session_cleanup sweep"
 
+#: How long after a session's harness launched work that outlives the prompt
+#: the RSS recycle and the idle sweep still treat that session as busy. Claude
+#: Code runs a backgrounded command or a Workflow in the session's own process
+#: tree after the prompt returns, and reports the launch on the launching tool
+#: call; it reports nothing a client can read while that work runs, nor when it
+#: ends. So the hold is bounded by time: long enough for an ordinary workflow,
+#: short enough that a launch cannot exempt a runaway tree from the memory
+#: ceiling for the rest of the session's life.
+HARNESS_BACKGROUND_WORK_HOLD_SECS = 3600.0
+
 
 class ShutdownSignal(Protocol):
     """The subset of ``asyncio.Event`` used by the cleanup loop."""
@@ -131,6 +141,11 @@ def _no_attached_subagents(key: str) -> bool:
 def _no_pending_injection(key: str) -> bool:
     """Default injection probe: a manager with no gateway injects nothing."""
     return False
+
+
+def _no_background_launch(provider: LLMProvider) -> tuple[float, str] | None:
+    """Default background-launch probe: no provider reports a launch."""
+    return None
 
 
 @dataclass(slots=True)
@@ -245,6 +260,14 @@ class CleanupDeps:
     # and defaults to "nothing injecting" so a manager without a gateway keeps
     # its existing behaviour.
     has_pending_injection: Callable[[str], bool] = _no_pending_injection
+    # ``(seconds since, description)`` of the newest work the session's harness
+    # launched to keep running after the prompt returned, or ``None``. A free
+    # semaphore only proves Kiro Crew's own prompt returned, and this is the only
+    # witness to that work. Synchronous -- it reads one record -- and defaults
+    # to "nothing launched" so a manager without ACP providers is unchanged.
+    provider_background_launch: Callable[[LLMProvider], tuple[float, str] | None] = (
+        _no_background_launch
+    )
 
 
 class SessionCleanup:
@@ -787,6 +810,24 @@ class SessionCleanup:
                         key,
                     )
                     continue
+                # The harness's own background work, which neither the
+                # semaphore nor the sub-agent probe can see: Claude Code keeps a
+                # backgrounded command or Workflow running in this tree after
+                # the prompt returned. A launch inside the hold keeps the
+                # session; an older one recycles, and the notice names it.
+                # Synchronous, so the no-suspend window to ``reset`` holds.
+                launch = self._harness_background_launch(session)
+                if launch is not None and launch[0] <= HARNESS_BACKGROUND_WORK_HOLD_SECS:
+                    self._deps.logger.info(
+                        "RSS recycle: session %s tree rss=%dMB exceeds %dMB but its "
+                        "harness launched background work %.0fs ago (%s); skipping",
+                        key,
+                        rss,
+                        self.state.rss_max_mb,
+                        launch[0],
+                        launch[1],
+                    )
+                    continue
                 # reset revalidates both object identity and the busy semaphore
                 # under its own lock after the unlocked RSS measurement, and
                 # ``skip_if_injecting`` puts the counter read under that same
@@ -809,13 +850,33 @@ class SessionCleanup:
                     self.state.rss_max_mb,
                 )
                 self._deps.stats_factory().inc_session_cleaned()
-                await self._owner._fire_recycle_callback(
-                    key,
-                    reason=f"memory limit ({rss}MB)",
-                )
+                reason = f"memory limit ({rss}MB)"
+                if launch is not None:
+                    reason += (
+                        "; background work its agent started earlier may have been "
+                        f"stopped: {launch[1]}"
+                    )
+                await self._owner._fire_recycle_callback(key, reason=reason)
             except Exception:
                 # One victim cannot suppress the rest of this tick.
                 self._deps.logger.exception("RSS recycle failed for session %s", key)
+
+    def _harness_background_launch(self, session: SessionEntry) -> tuple[float, str] | None:
+        """*session*'s newest background launch as ``(seconds since, description)``.
+
+        ``None`` means its harness launched nothing, or the provider cannot say.
+        Not fail-closed, unlike the two probes below: no launch is the normal
+        answer for every session that started no background work, and an
+        unreadable one must not hold the memory ceiling off.
+        """
+        provider = getattr(session, "provider", None)
+        if provider is None:
+            return None
+        try:
+            return self._deps.provider_background_launch(provider)
+        except Exception:
+            self._deps.logger.debug("Background-launch probe failed", exc_info=True)
+            return None
 
     def _injection_pending(self, key: str) -> bool:
         """Fail-closed read of "is a completion injection in flight for *key*?".
@@ -1547,6 +1608,23 @@ class SessionCleanup:
                 self._deps.logger.info(
                     "Idle sweep: %s began a turn mid-sweep - left running",
                     key,
+                )
+                continue
+            # Then the harness, on BOTH axes, for the reason the RSS recycle
+            # asks it: a free semaphore and no attached sub-agent do not mean
+            # the harness stopped working for this session. Work it launched to
+            # run after the prompt keeps going with no turn and no tab, which is
+            # what makes it look idle to ``last_used`` and abandoned to the
+            # orphan axis. Synchronous, like every read from here to ``reset``.
+            launch = self._harness_background_launch(scanned)
+            if launch is not None and launch[0] <= HARNESS_BACKGROUND_WORK_HOLD_SECS:
+                self._deps.logger.info(
+                    "Idle sweep: %s looks %s but its harness launched background "
+                    "work %.0fs ago (%s) - left running",
+                    key,
+                    "orphaned" if is_orphan else "idle",
+                    launch[0],
+                    launch[1],
                 )
                 continue
             # Then the clock, on the idle axis only. A turn that started AND
