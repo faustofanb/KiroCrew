@@ -201,6 +201,30 @@ class TestBarePathPassIsNarrowerThanTheInliner:
 
         assert out == f"docs say `open {_ABS_A}`, and here it is:\n{STRIPPED_IMAGE_MARKER}"
 
+    # The four literal shapes, in both the markdown and the bare form.
+    # Each is text the user wrote, not an attachment, so it stays as written.
+    @pytest.mark.parametrize(
+        "text",
+        [
+            f"inline `{_ABS_A}` here",
+            f"inline `![x]({_ABS_A})` here",
+            f"fenced:\n```\n{_ABS_A}\n![x]({_ABS_A})\n```\nend",
+            f"indented:\n\n    {_ABS_A}\n    ![x]({_ABS_A})\n\nend",
+            f"escaped \\![x]({_ABS_A}) markup",
+        ],
+    )
+    def test_literal_code_and_escaped_shapes_keep_their_text(self, text):
+        assert strip_image_refs(text) == text
+
+    def test_prose_next_to_a_literal_shape_is_still_stripped(self):
+        text = f"escaped \\![x]({_ABS_A}), real ![y]({_ABS_B})\n    {_ABS_A}\n{_ABS_B}"
+        out = strip_image_refs(text)
+
+        assert out == (
+            f"escaped \\![x]({_ABS_A}), real {STRIPPED_IMAGE_MARKER}\n"
+            f"    {_ABS_A}\n{STRIPPED_IMAGE_MARKER}"
+        )
+
 
 class TestBarePathPassAgreesWithTheUncPredicate:
     r"""Both passes answer "is this ``//`` destination remote?" the same way.
