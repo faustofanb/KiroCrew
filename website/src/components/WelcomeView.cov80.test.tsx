@@ -1,4 +1,4 @@
-import { screen, fireEvent, waitFor, act } from '@testing-library/react'
+import { screen, fireEvent, within } from '@testing-library/react'
 import { renderWithProviders } from '../test/helpers'
 import WelcomeView from './WelcomeView'
 import { api } from '../api/client'
@@ -80,33 +80,28 @@ describe('WelcomeView', () => {
     expect(setInput).toHaveBeenCalledWith('zzq code')
   })
 
-  it('the refresh button forces a regeneration and swaps the pills', async () => {
-    suggestions.mockResolvedValue(payload(['zzq old']))
+  it('offers no refresh control: the suggestion list is fetched once and never forced', async () => {
+    suggestions.mockResolvedValue(payload(['zzq only']))
     renderWithProviders(<WelcomeView setInput={vi.fn()} />)
-    await screen.findByRole('button', { name: 'zzq old' })
+    await screen.findByRole('button', { name: 'zzq only' })
 
-    suggestions.mockResolvedValue(payload(['zzq fresh']))
-    fireEvent.click(
-      screen.getByRole('button', { name: i18nT('components.welcomeView.refresh_suggestions') }),
-    )
-
-    expect(await screen.findByRole('button', { name: 'zzq fresh' })).toBeInTheDocument()
-    expect(suggestions).toHaveBeenCalledWith(true)
+    expect(screen.getAllByRole('button')).toHaveLength(1)
+    expect(suggestions).toHaveBeenCalledTimes(1)
+    expect(suggestions).not.toHaveBeenCalledWith(true)
   })
 
-  it('a failed refresh stops spinning and keeps the current pills', async () => {
-    suggestions.mockResolvedValue(payload(['zzq kept']))
+  it('a failed suggestions fetch renders an ErrorNotice with the hand-off and keeps the fallback cards', async () => {
+    suggestions.mockRejectedValue(new Error('zzq suggestions down'))
     renderWithProviders(<WelcomeView setInput={vi.fn()} />)
-    await screen.findByRole('button', { name: 'zzq kept' })
 
-    suggestions.mockRejectedValueOnce(new Error('zzq refresh down'))
-    const refresh = screen.getByRole('button', {
-      name: i18nT('components.welcomeView.refresh_suggestions'),
-    })
-    await act(async () => { fireEvent.click(refresh) })
-
-    await waitFor(() => expect(refresh).toBeEnabled())
-    expect(screen.getByRole('button', { name: 'zzq kept' })).toBeInTheDocument()
+    const notice = await screen.findByRole('alert')
+    // The localized line, never the transport error's own text.
+    expect(notice).toHaveTextContent(i18nT('components.welcomeView.suggestions_failed_to_load'))
+    expect(notice).not.toHaveTextContent('zzq suggestions down')
+    expect(within(notice).getByRole('button', { name: i18nT('components.askAgent.ask_the_agent') })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: i18nT('components.welcomeView.suggestion_search_code') }),
+    ).toBeInTheDocument()
   })
 
   it('orchestrator mode swaps the heading and drops the pills', () => {
@@ -116,7 +111,7 @@ describe('WelcomeView', () => {
     expect(screen.getByText(i18nT('components.welcomeView.autopilot'))).toBeInTheDocument()
     expect(
       screen.queryByRole('button', {
-        name: i18nT('components.welcomeView.refresh_suggestions'),
+        name: i18nT('components.welcomeView.suggestion_search_code'),
       }),
     ).not.toBeInTheDocument()
 
