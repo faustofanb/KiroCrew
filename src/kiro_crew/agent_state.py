@@ -18,6 +18,11 @@ rather than the kiro spec:
 - ``forked_from`` / ``private_to`` (str): recorded on a template that is one
   crew's private copy of another template (blueprint semantics — editing a
   crew's definition forks a copy instead of mutating the shared file).
+- ``shipped_grants`` (list[str]): on a generated conductor spec, the
+  ``allowedTools`` grants Crew itself wrote at its last install. The next install
+  reads the file back and keeps every entry this list does not name as the
+  user's own, so a user's approval survives the rebuild while a grant an earlier
+  release shipped and the current one does not is still dropped.
 
 State file (``~/.kiro/crew/agent_model_state.json``, honoring ``KIROCREW_HOME``)::
 
@@ -41,7 +46,7 @@ import os
 import stat
 import threading
 from pathlib import Path
-from typing import Iterator, MutableMapping
+from typing import Iterator, MutableMapping, Sequence
 
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config.paths import config_dir
@@ -57,6 +62,9 @@ _MIRRORED_FROM = "mirrored_from"
 _MIRRORED_STAT = "mirrored_stat"
 _FORKED_FROM = "forked_from"
 _PRIVATE_TO = "private_to"
+# The ``allowedTools`` grants Crew itself last wrote onto a generated spec, so a
+# regeneration can tell its own previous output apart from what the user added.
+_SHIPPED_GRANTS = "shipped_grants"
 
 # Guards in-process read-modify-write races (e.g. dashboard PATCH vs gateway
 # refresh). ``atomic_write`` makes each WRITE atomic, but two processes can
@@ -462,6 +470,52 @@ def set_mirrored_stat(name: str, value: str | None) -> None:
             entry[_MIRRORED_STAT] = str(value)
         else:
             entry.pop(_MIRRORED_STAT, None)
+        if entry:
+            data[name] = entry
+        else:
+            data.pop(name, None)
+        _write(data)
+
+
+def get_shipped_grants(name: str) -> tuple[str, ...] | None:
+    """Return the ``allowedTools`` grants Crew itself last wrote onto a generated spec.
+
+    A generated conductor spec is rewritten on every ``rebuild_agent_config``, and
+    the file on disk is the only place a user's own approvals live -- nothing in
+    the file says which entries are the installer's and which are the user's. This
+    record does: an entry it names is Crew's and is re-derived from the current
+    release's grant tuple; one it does not name is the user's and is kept
+    (``agent_materialization.conductor_agents``). It is the provenance the worker
+    installer's docstring asks for before a derived spec may carry an entry
+    forward, because an add-only merge without it keeps every grant an earlier
+    release shipped and a later one stopped shipping -- the goal conductor's core
+    grant is named verbs where an earlier release's was a bare ``@kirocrew-core``,
+    and that narrowing reaches an existing install only when the installer can
+    tell its own earlier output from the user's.
+
+    ``None`` when no record exists (a spec written by a release before the record,
+    or never written) or when the record is not a list of strings: neither can
+    vouch for an entry, so a caller keeps nothing on that answer. An EMPTY list is a
+    record -- "Crew shipped no grant here" -- and is returned as ``()``.
+    """
+    with _lock:
+        value = _entry(_read(), name).get(_SHIPPED_GRANTS)
+    if not isinstance(value, list) or not all(isinstance(ref, str) for ref in value):
+        return None
+    return tuple(value)
+
+
+def set_shipped_grants(name: str, grants: Sequence[str] | None) -> None:
+    """Record (or clear, when ``grants`` is None) the grants Crew wrote onto *name*."""
+    with _locked():
+        data = _read(strict=True)
+        entry = data.get(name)
+        if not isinstance(entry, dict):
+            entry = {}
+        if grants is not None:
+            entry[_SHIPPED_GRANTS] = [str(ref) for ref in grants]
+        else:
+            entry.pop(_SHIPPED_GRANTS, None)
         if entry:
             data[name] = entry
         else:

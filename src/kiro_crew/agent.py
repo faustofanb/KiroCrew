@@ -2121,9 +2121,10 @@ def build_agent_config(*, gated_off: "frozenset[str] | None" = None) -> dict:
     # ``_load_existing_config`` path takes entries from an on-disk spec that
     # never comes through here; for that caller this filter is idempotent (the
     # predicate is pure, so filtering twice equals filtering once). A caller
-    # that replaces ``allowedTools`` wholesale (``_install_conductor_agent``)
-    # is unaffected. The SEL audit inside is best-effort and never raises, so
-    # the purity note above still holds for config/managed-state.
+    # that builds its own ``allowedTools`` from a grant tuple plus the entries on
+    # its installed spec (``conductor_agents._governed_grants``) is unaffected:
+    # it filters that list itself. The SEL audit inside is best-effort and never
+    # raises, so the purity note above still holds for config/managed-state.
     auto_approve._apply_allowed_tools_ceiling(config, source="build_agent_config")
     return config
 
@@ -3399,15 +3400,18 @@ def rebuild_agent_config(
     except Exception:
         logger.debug("kirocrew-heartbeat agent install failed", exc_info=True)
 
-    # Install kirocrew-conductor agent (goal decomposition + session-control dispatch)
+    # Install kirocrew-conductor agent (goal decomposition + session-control dispatch).
+    # ``clean`` is passed through: the conductor installers carry the user's own
+    # ``allowedTools`` entries forward across a rebuild, and a clean rebuild is the
+    # explicit reset that drops them, as it drops every customization above.
     try:
-        conductor_agents._install_conductor_agent()
+        conductor_agents._install_conductor_agent(clean=clean)
     except Exception:
         logger.debug("kirocrew-conductor agent install failed", exc_info=True)
 
     # Install kirocrew-pipeline-conductor agent (repository pipeline fleet supervision)
     try:
-        conductor_agents._install_pipeline_conductor_agent()
+        conductor_agents._install_pipeline_conductor_agent(clean=clean)
     except Exception:
         logger.debug("kirocrew-pipeline-conductor agent install failed", exc_info=True)
 
@@ -3420,13 +3424,13 @@ def rebuild_agent_config(
     # already running under the old name resolves it on every dispatch, which is
     # what the alias exists to keep working.
     try:
-        conductor_agents._install_ledger_conductor_agent()
+        conductor_agents._install_ledger_conductor_agent(clean=clean)
     except Exception:
         logger.debug("kirocrew-ledger-conductor alias install failed", exc_info=True)
 
     # Install kirocrew-security-conductor agent (one security audit's worker fleet)
     try:
-        conductor_agents._install_security_conductor_agent()
+        conductor_agents._install_security_conductor_agent(clean=clean)
     except Exception:
         logger.debug("kirocrew-security-conductor agent install failed", exc_info=True)
 

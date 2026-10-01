@@ -1616,8 +1616,8 @@ multi-member batch spanning layers commits one overlay delta atomically.
 Public capability versions are random identifiers tied to the saved internal
 materialization digest, never the digest of secret-bearing source bytes.
 
-Kiro Crew tracks two pieces of per-agent state that are **not** part of the
-kiro-cli agent schema: `model_managed` (whether an agent's `model` tracks the
+Kiro Crew tracks per-agent state that is **not** part of the kiro-cli agent
+schema, chiefly `model_managed` (whether an agent's `model` tracks the
 shipped default or is a frozen user pick) and `cc_model` (a per-agent Claude
 Code model). kiro-cli validates `~/.kiro/agents/*.json` with serde
 `deny_unknown_fields` and rejects the *entire* spec on any unknown key, then
@@ -1630,7 +1630,8 @@ name:
 ```json
 {
   "kirocrew":           {"model_managed": true},
-  "kirocrew-heartbeat": {"cc_model": "claude-sonnet-4.6"}
+  "kirocrew-heartbeat": {"cc_model": "claude-sonnet-4.6"},
+  "kirocrew-conductor": {"shipped_grants": ["session", "report", "tool_search", "..."]}
 }
 ```
 
@@ -1640,6 +1641,15 @@ name:
   seeds managed-state on a fresh/clean install (never clobbering a frozen pick).
 - `_refresh_dynamic_fields()` sources managed-state from the sidecar and strips
   any stray `model_managed`/`cc_model` from the spec (steady-state self-heal).
+- `shipped_grants` is a third per-agent value, kept only for the four generated
+  conductor specs: the `allowedTools` grants Crew itself wrote at the last
+  install, recorded after the spec write. The next install reads the spec back
+  and keeps every entry this list does not name as the user's own, so an approval
+  the user added survives the rebuild while a grant an earlier release shipped
+  and this one no longer does is still dropped
+  (`agent_materialization/conductor_agents.py`, `_governed_grants`; #15567).
+  Absent or malformed, the record vouches for nothing and that rebuild keeps
+  nothing; a clean rebuild keeps nothing and rewrites the record.
   A **managed** spec's `model` is set on every refresh to the shipped default,
   or to the `"auto"` sentinel when the shipped template pins none — never left
   as-is. That is what makes the global `agent.model` reversible: the global is

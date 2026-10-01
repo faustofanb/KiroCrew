@@ -433,7 +433,9 @@ and must never be written into the spec (`lift_and_strip_bookkeeping` lifts and
 strips them): `model_managed`, whether the pin tracks shipped defaults or is
 frozen as your explicit pick, and `cc_model`, a per-agent model for the
 `claude_code` provider, which cannot pick one from the spec the way kiro-cli
-does.
+does. A third, `shipped_grants`, travels with a conductor spec's `allowedTools`:
+the grants Crew itself wrote at its last install, which is how the next install
+tells its own entries from yours (see "Ownership and refresh").
 
 ### Resources
 
@@ -562,10 +564,10 @@ would otherwise clobber your pin.
 | `kirocrew-lite.json` | generated | every gateway start |
 | `kirocrew-guest.json` | generated | every gateway start (the tool-less agent a non-operator channel sender talks to) |
 | `kirocrew-worker.json` | DERIVED from `kirocrew.json` | every gateway start, and re-checked before every worker session |
-| `kirocrew-conductor.json` | generated | every gateway start |
-| `kirocrew-ledger-conductor.json` | generated | every gateway start |
-| `kirocrew-pipeline-conductor.json` | generated | every gateway start |
-| `kirocrew-security-conductor.json` | generated | every gateway start |
+| `kirocrew-conductor.json` | generated; your `allowedTools` entries are carried forward | every gateway start |
+| `kirocrew-ledger-conductor.json` | generated; your `allowedTools` entries are carried forward | every gateway start |
+| `kirocrew-pipeline-conductor.json` | generated; your `allowedTools` entries are carried forward | every gateway start |
+| `kirocrew-security-conductor.json` | generated; your `allowedTools` entries are carried forward | every gateway start |
 | `kirocrew-knowledge.json` | generated | every gateway start |
 | `kirocrew-research.json` | generated | every gateway start |
 | `kirocrew-heartbeat.json` | generated | every gateway start |
@@ -595,8 +597,29 @@ default agent no longer has. A project checkout shipping its own
 first, and Crew will neither rewrite a repository's tracked content nor honour
 it.
 
-What you may safely hand-edit: a spec you authored yourself, and in an owned or
-app-generated one, nothing — change `~/.kiro/crew/agent.json` or the Template pane instead.
+The four conductor specs are rewritten on every rebuild from their grant tuples,
+and one field of yours survives that: `allowedTools`. The installer reads the
+spec it is about to replace and carries your entries forward after the shipped
+grants, through the same governance ceiling the shipped grants pass
+(`agent_materialization/conductor_agents.py`, `_governed_grants`), so an entry
+you approved on `kirocrew-conductor.json` is still approved at the next start
+while an entry the ceiling forbids is still removed. What tells your entry apart
+from the installer's own is the `shipped_grants` record the installer leaves in
+the sidecar (below): an entry on disk that record names is Crew's and is
+re-derived from the current release, so a grant one release shipped and the next
+one stopped shipping is dropped rather than kept as yours. A spec written by a
+release before the record keeps nothing on its first rebuild; re-add your entries
+once and they are kept from then on. `kirocrew setup --agent-only --clean` drops
+them, as it drops every customization of `kirocrew.json`. A shipped grant you
+deleted comes back — narrow a conductor through the governance ceiling, not by
+editing the generated list — and nothing leaves the list silently: one warning in
+the gateway log names every entry a rebuild did not carry forward, and a drop the
+ceiling did not make is recorded as a revoked auto-approval in the security event
+log.
+
+What you may safely hand-edit: a spec you authored yourself; a conductor spec's
+`allowedTools`; and in any other owned or app-generated field, nothing — change
+`~/.kiro/crew/agent.json` or the Template pane instead.
 
 ## Markdown form and the Template pane
 

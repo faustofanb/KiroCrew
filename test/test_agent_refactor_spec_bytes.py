@@ -388,6 +388,9 @@ def materialize(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str) 
 
 
 #: Digests recorded from the pre-split ``kiro_crew.agent``. See the module docstring.
+#: The ``state`` digests were re-recorded once since: the conductor installers leave a
+#: ``shipped_grants`` record per conductor spec in the sidecar; the spec files and the
+#: audit records are the pre-split bytes still.
 GOLDEN: dict[str, dict[str, Any]] = {
     "clean_over_customized": {
         "events": "e4016eba77605642de911e1089127f33fdb4c60579b4fd040df307c601101128",
@@ -405,7 +408,7 @@ GOLDEN: dict[str, dict[str, Any]] = {
             "kirocrew.json": "2f5c6cca408b8340cf072b8c7293b5369631a07ee7450369aeba906af87eb115",
             "kirocrew.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         },
-        "state": "2a54e4a13aa343209039218e7484c4b9036874cfa7f45ad311118dc083ee974e",
+        "state": "b88b419f506a4a98b9a440c21d8c75f27942f31690712b5afb54849a6bea7aa0",
         "unrefreshed": [],
     },
     "customized": {
@@ -424,7 +427,7 @@ GOLDEN: dict[str, dict[str, Any]] = {
             "kirocrew.json": "7b436d6e0f68515cb41696fd90ed27e7ed39fd23254f2671ca2efffe331bbbcc",
             "kirocrew.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         },
-        "state": "a5a64dd4b041ca89821f29b809610947f2f1f4513c285818ebaa998874c6a148",
+        "state": "b9703fb3cf0717d4bb3e5ea73993f44b71e456ff74bf831110efd10141010b9e",
         "unrefreshed": [],
     },
     "forks": {
@@ -445,7 +448,7 @@ GOLDEN: dict[str, dict[str, Any]] = {
             "my-crew.json": "a35844964701bef18228b8e89787e9f8f106e17ba079691e7b668877da2e68c9",
             "orphan-crew.json": "30c576d8c4eb514bdbb5139402df6588504cc92cfef8b580ec2e16bc98f74056",
         },
-        "state": "6f420d973fbdf7e48cc5784b36cdc8692abe727062e16c33798348e3e9c6b09d",
+        "state": "0c81df8870e6a22ff0c62f816db0d45ae1d3da49efda0b8e954f7b67f4748996",
         "unrefreshed": ["orphan-crew"],
     },
     "fresh": {
@@ -464,7 +467,7 @@ GOLDEN: dict[str, dict[str, Any]] = {
             "kirocrew.json": "cb2abd969c70c183db542bec3498c8ef73249533712eef441adcd4ec4d0780ef",
             "kirocrew.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         },
-        "state": "2a54e4a13aa343209039218e7484c4b9036874cfa7f45ad311118dc083ee974e",
+        "state": "b88b419f506a4a98b9a440c21d8c75f27942f31690712b5afb54849a6bea7aa0",
         "unrefreshed": [],
     },
     "governed": {
@@ -483,7 +486,7 @@ GOLDEN: dict[str, dict[str, Any]] = {
             "kirocrew.json": "795bb986be7c72eb53fb3546f29342ec7746975b0bc09931e2de13a8e3ecee54",
             "kirocrew.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         },
-        "state": "a5a64dd4b041ca89821f29b809610947f2f1f4513c285818ebaa998874c6a148",
+        "state": "b9703fb3cf0717d4bb3e5ea73993f44b71e456ff74bf831110efd10141010b9e",
         "unrefreshed": [],
     },
     "object_hooks": {
@@ -502,7 +505,7 @@ GOLDEN: dict[str, dict[str, Any]] = {
             "kirocrew.json": "16f62d761811acf8e9eae5d8f226e98e997677bf638d8d4b533b739e73ccfdbf",
             "kirocrew.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         },
-        "state": "2a54e4a13aa343209039218e7484c4b9036874cfa7f45ad311118dc083ee974e",
+        "state": "b88b419f506a4a98b9a440c21d8c75f27942f31690712b5afb54849a6bea7aa0",
         "unrefreshed": [],
     },
     "registry_mode": {
@@ -521,7 +524,7 @@ GOLDEN: dict[str, dict[str, Any]] = {
             "kirocrew.json": "1bc59bfa09d6d751b5f5a34d96ed8454963baa4f655e42e34dd6cf7ad01fd972",
             "kirocrew.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         },
-        "state": "2a54e4a13aa343209039218e7484c4b9036874cfa7f45ad311118dc083ee974e",
+        "state": "b88b419f506a4a98b9a440c21d8c75f27942f31690712b5afb54849a6bea7aa0",
         "unrefreshed": [],
     },
     "user_hooks": {
@@ -540,7 +543,7 @@ GOLDEN: dict[str, dict[str, Any]] = {
             "kirocrew.json": "7e71a35e225f0f41250b6ca73026183c53fac8f02f992e54384d81981b2d8d74",
             "kirocrew.lock": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         },
-        "state": "2a54e4a13aa343209039218e7484c4b9036874cfa7f45ad311118dc083ee974e",
+        "state": "b88b419f506a4a98b9a440c21d8c75f27942f31690712b5afb54849a6bea7aa0",
         "unrefreshed": [],
     },
 }

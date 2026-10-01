@@ -71,6 +71,14 @@ narrows, and each narrowing is a permission decision:
   `_may_auto_approve`; anything the governance ceiling withholds is recorded in
   the SEL as `mcp_auto_approve_withheld` and then goes through the ordinary
   approval gate.
+- **The operator's own `allowedTools` entries survive the rebuild.** The
+  installer runs on every gateway start and reads the spec it replaces: an entry
+  the operator added is carried forward after the shipped grants, through the
+  same ceiling, while the shipped set itself is re-derived from this release
+  (`_governed_grants`, with the `shipped_grants` sidecar record telling the two
+  apart). A clean rebuild drops the operator's entries; a rebuild that drops any
+  entry logs a warning naming it. Not a weakening of the withholds above: what
+  Crew ships is unchanged, and an entry the operator writes is theirs to write.
 
 Auto-approved core verbs are reads (`resource_status`, `list_sessions`,
 `skill_search`, `skill_fetch`), the conductor's own patrol lifecycle
