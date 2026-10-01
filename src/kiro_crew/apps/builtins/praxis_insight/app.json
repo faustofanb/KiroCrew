@@ -26,6 +26,11 @@
         "route": "/embedded-tools",
         "label": "Dev Tools",
         "icon": "Wrench"
+      },
+      {
+        "route": "/git-gui",
+        "label": "Git GUI",
+        "icon": "GitBranch"
       }
     ]
   },

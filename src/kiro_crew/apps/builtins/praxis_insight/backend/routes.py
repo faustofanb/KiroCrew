@@ -480,6 +480,166 @@ async def _et_launch(request: web.Request) -> web.Response:
         return _json({"error": str(exc), "code": "launch_failed"}, 500)
 
 
+# ── Fork 级 Git GUI ──
+
+def _git_root(request: web.Request) -> str:
+    from . import embedded_tools
+
+    root = embedded_tools and _load_root()
+    return root
+
+def _load_root() -> str:
+    from . import git_forks
+
+    return git_forks.get_root()
+
+
+@_guarded
+async def _gg_repos(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_gui
+
+    try:
+        return _json(await asyncio.to_thread(git_gui.scan, _load_root()))
+    except Exception as exc:
+        return _json({"error": str(exc), "code": "error"}, 500)
+
+
+@_guarded
+async def _gg_log(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_gui
+
+    try:
+        return _json(await asyncio.to_thread(
+            git_gui.log_graph,
+            request.query.get("repo", ""), _load_root(),
+            int(request.query.get("limit", "100")),
+            request.query.get("branch", "HEAD"),
+        ))
+    except FileNotFoundError as exc:
+        return _json({"error": str(exc), "code": "not_found"}, 404)
+    except Exception as exc:
+        return _json({"error": str(exc), "code": "git_error"}, 500)
+
+
+@_guarded
+async def _gg_status(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_gui
+
+    try:
+        return _json(await asyncio.to_thread(git_gui.status, request.query.get("repo", ""), _load_root()))
+    except FileNotFoundError as exc:
+        return _json({"error": str(exc), "code": "not_found"}, 404)
+
+
+@_guarded
+async def _gg_diff_file(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_gui
+
+    try:
+        return _json(await asyncio.to_thread(
+            git_gui.diff_file,
+            request.query.get("repo", ""), _load_root(),
+            request.query.get("path", ""), request.query.get("staged") == "1",
+        ))
+    except FileNotFoundError:
+        return _json({"error": "not found", "code": "not_found"}, 404)
+
+
+@_guarded
+async def _gg_diff_commit(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_gui
+
+    try:
+        return _json(await asyncio.to_thread(
+            git_gui.diff_commit, request.query.get("repo", ""), _load_root(), request.query.get("sha", ""),
+        ))
+    except FileNotFoundError:
+        return _json({"error": "not found", "code": "not_found"}, 404)
+
+
+@_guarded
+async def _gg_stage(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_gui
+
+    body = await request.json() if request.can_read_body else {}
+    repo = body.get("repo", "")
+    root = _load_root()
+    op = body.get("op", "")
+    try:
+        if op == "file":
+            if body.get("unstage"):
+                return _json(await asyncio.to_thread(git_gui.unstage_file, repo, root, body.get("path", "")))
+            return _json(await asyncio.to_thread(git_gui.stage_file, repo, root, body.get("path", "")))
+        if op == "all":
+            if body.get("unstage"):
+                return _json(await asyncio.to_thread(git_gui.unstage_all, repo, root))
+            return _json(await asyncio.to_thread(git_gui.stage_all, repo, root))
+        if op == "commit":
+            return _json(await asyncio.to_thread(git_gui.commit, repo, root, body.get("message", ""), bool(body.get("amend"))))
+        return _json({"error": f"unknown op {op!r}", "code": "bad_request"}, 400)
+    except ValueError as exc:
+        return _json({"error": str(exc), "code": "bad_request"}, 400)
+    except (FileNotFoundError, RuntimeError) as exc:
+        return _json({"error": str(exc), "code": "git_error"}, 409)
+
+
+@_guarded
+async def _gg_branches(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_gui
+
+    try:
+        return _json(await asyncio.to_thread(git_gui.branches, request.query.get("repo", ""), _load_root()))
+    except FileNotFoundError:
+        return _json({"error": "not found", "code": "not_found"}, 404)
+
+
+@_guarded
+async def _gg_branch_op(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_gui
+
+    body = await request.json() if request.can_read_body else {}
+    try:
+        if body.get("op") == "create":
+            return _json(await asyncio.to_thread(git_gui.create_branch, body.get("repo", ""), _load_root(), body.get("name", ""), bool(body.get("checkout", True))))
+        if body.get("op") == "checkout":
+            return _json(await asyncio.to_thread(git_gui.checkout_branch, body.get("repo", ""), _load_root(), body.get("name", "")))
+        return _json({"error": "unknown op", "code": "bad_request"}, 400)
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        return _json({"error": str(exc), "code": "git_error"}, 409)
+
+
+@_guarded
+async def _gg_blame(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_gui
+
+    try:
+        return _json(await asyncio.to_thread(
+            git_gui.blame, request.query.get("repo", ""), _load_root(), request.query.get("path", ""),
+        ))
+    except FileNotFoundError:
+        return _json({"error": "not found", "code": "not_found"}, 404)
+    except RuntimeError as exc:
+        return _json({"error": str(exc), "code": "git_error"}, 409)
+
+
 def register_routes(app: web.Application) -> None:
     """Register on the gateway's aiohttp Application (single-arg convention)."""
     r = app.router
@@ -512,3 +672,13 @@ def register_routes(app: web.Application) -> None:
     r.add_post(f"{_BASE}/tools/{{tool_id}}/remove", _et_remove)
     r.add_get(f"{_BASE}/tools/check", _et_check)
     r.add_post(f"{_BASE}/tools/{{tool_id}}/launch", _et_launch)
+    # Fork 级 Git GUI
+    r.add_get(f"{_BASE}/gitgui/repos", _gg_repos)
+    r.add_get(f"{_BASE}/gitgui/log", _gg_log)
+    r.add_get(f"{_BASE}/gitgui/status", _gg_status)
+    r.add_get(f"{_BASE}/gitgui/diff/file", _gg_diff_file)
+    r.add_get(f"{_BASE}/gitgui/diff/commit", _gg_diff_commit)
+    r.add_post(f"{_BASE}/gitgui/stage", _gg_stage)
+    r.add_get(f"{_BASE}/gitgui/branches", _gg_branches)
+    r.add_post(f"{_BASE}/gitgui/branch", _gg_branch_op)
+    r.add_get(f"{_BASE}/gitgui/blame", _gg_blame)
