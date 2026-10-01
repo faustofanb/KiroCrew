@@ -918,6 +918,110 @@ def _substitute_local_assignments(command: str) -> str:
     return "".join(out)
 
 
+def _assigned_names(command: str) -> set[str]:
+    """Names assigned locally anywhere in *command*."""
+    return {
+        name
+        for segment, _sep in _split_segments(command)
+        for name, _v in _iter_local_assignments(segment)
+    }
+
+
+def _assigned_values(command: str) -> dict[str, str]:
+    """Locally-assigned name to the value sh stores for it, quotes removed."""
+    values: dict[str, str] = {}
+    for segment, _separator in _split_segments(command):
+        for name, value in _iter_local_assignments(segment):
+            if len(values) < _CRON_MAX_ASSIGNMENTS or name in values:
+                values[name] = _shell_quote_removal(value)[:_CRON_MAX_EXPANDED_VALUE]
+    return values
+
+
+def _expand_tracked_to_empty(command: str) -> str:
+    """Return *command* with every locally-assigned reference expanded to EMPTY.
+
+    This is the view a nested shell sees when the outer one expands nothing --
+    a single-quoted `sh -c '...'`. The assignment is local to the outer shell,
+    so the inner one has no such name and expands the reference to empty.
+    """
+    out = command
+    for name in sorted(_assigned_names(command), key=len, reverse=True):
+        out = re.sub(r"\$\{" + re.escape(name) + r"\}", "", out)
+        out = re.sub(r"\$" + re.escape(name) + r"(?![A-Za-z0-9_])", "", out)
+    return out
+
+
+def _expand_as_nested_shell_sees(command: str) -> str:
+    """Expand what the OUTER shell expands; empty what only a NESTED shell sees.
+
+    Which shell level expands a reference is decided by the quoting around THAT
+    reference, so a view that treats them all alike is wrong in one direction or
+    the other. Per reference:
+
+    - unquoted or double-quoted -- the outer shell expands it, and the value it
+      produces reaches the nested shell as literal text;
+    - inside single quotes, or with the `$` backslash-escaped -- the outer shell
+      leaves it alone, so the NESTED shell expands it against an environment that
+      never received the assignment, which yields the empty string.
+
+    `A=s; sh -c 'cat ~/.s'$A'${A}h/id_rsa'` needs both rules in one word: `$A`
+    becomes `s` and `${A}` becomes empty, so the nested shell opens `~/.ssh`.
+    """
+    states, escaped = _quote_states(command)
+    values = _assigned_values(command)
+    out: list[str] = []
+    index = 0
+    length = len(command)
+    while index < length:
+        if command[index] == "$":
+            match = _CRON_VAR_REF_RE.match(command, index)
+            if match is not None and match.group(1) in values:
+                if escaped[index]:
+                    # The outer shell CONSUMES the escaping backslash and hands
+                    # the bare `$NAME` down, so the backslash must not survive
+                    # into this view -- left in, it re-escapes the next character
+                    # and the unescaped form of this view reads `.s\\sh`, not
+                    # `.ssh`.
+                    if out and out[-1] == "\\":
+                        out.pop()
+                    out.append("")
+                elif states[index] == "'":
+                    out.append("")
+                else:
+                    out.append(values[match.group(1)])
+                index = match.end()
+                continue
+        out.append(command[index])
+        index += 1
+    return "".join(out)
+
+
+def _value_synthesizing_shell_syntax(command: str) -> str | None:
+    """Return the first name whose VALUE carries a `$` the resolver cannot model.
+
+    A value holding a bare `$` synthesizes a reference that exists only after
+    expansion: `DOLLAR=\\$; A=s; sh -c "cat ~/.ssh${DOLLAR}A/id_rsa"` hands the
+    inner shell `~/.ssh$A`, which it expands to `~/.ssh/` and reads the key. The
+    `$` is in the VALUE, so no single expansion view holds both the synthesized
+    reference and the empty it expands to -- which level expands which depends on
+    the quoting around each one. The construct is refused instead of
+    approximated, matching how an unresolvable `$var` is already handled.
+
+    A `$` that names an EARLIER assignment is not synthesis: `A=x; B=$A` is the
+    ordinary chaining the sequential resolver already models, and stays allowed.
+    """
+    seen: set[str] = set()
+    for segment, _separator in _split_segments(command):
+        for name, raw in _iter_local_assignments(segment):
+            value = _shell_quote_removal(raw)
+            for match in re.finditer(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)?", value):
+                referenced = match.group(1)
+                if referenced is None or referenced not in seen:
+                    return name
+            seen.add(name)
+    return None
+
+
 def _audit_governance_deny(session_key: str, tool_name: str, scope: str, decision: object) -> None:
     """Best-effort SEL audit of an out-of-band governance denial (file-backed).
 
@@ -1270,6 +1374,21 @@ def _vet_shell_command(command: str, *, governance_checked: bool = False) -> str
     # a refusal on `'.ss\h'` is a false positive the vet accepts.
     unquoted = _unquote(command)
     unescaped = _BACKSLASH_ESCAPE_RE.sub(r"\1", unquoted)
+    # A nested shell (`sh -c`, `bash -c`, `eval`) does NOT inherit a local
+    # assignment: it is not exported, so the INNER shell expands the reference to
+    # EMPTY while this resolver expands it to the outer value. That inverts the
+    # gate -- `A=s; sh -c 'cat ~/.ssh$A/id_rsa'` resolves to a harmless
+    # `~/.sshs/id_rsa` here and reads the key for real (verified). Scan the
+    # empty-expansion view too, which is what the inner shell actually sees.
+    emptied = _expand_tracked_to_empty(command)
+    nested = _expand_as_nested_shell_sees(command)
+    synthesizing = _value_synthesizing_shell_syntax(command)
+    if synthesizing is not None:
+        return (
+            "Error: cron command blocked: assignment value carries shell syntax "
+            f"({synthesizing}). A `$` inside a value synthesizes a reference that "
+            "a nested shell expands, so the path it builds cannot be resolved here."
+        )
     variants = (
         command,
         resolved,
@@ -1278,6 +1397,21 @@ def _vet_shell_command(command: str, *, governance_checked: bool = False) -> str
         _substitute_local_assignments(unquoted),
         unescaped,
         _substitute_local_assignments(unescaped),
+        # Unescape AFTER resolving. A value keeps its backslashes (`A="\\s"h`
+        # stores `\\sh`, which is correct), so the resolved view carries
+        # `.s\\sh` -- a name the credential scan cannot match while the shell's
+        # word expansion drops the backslash and reads `.ssh`. The pre-resolution
+        # `unescaped` views cannot cover this: the backslash enters with the
+        # VALUE, after they were built.
+        _BACKSLASH_ESCAPE_RE.sub(r"\1", _unquote(resolved)),
+        _BACKSLASH_ESCAPE_RE.sub(r"\1", resolved),
+        emptied,
+        _unquote(emptied),
+        _BACKSLASH_ESCAPE_RE.sub(r"\1", _unquote(emptied)),
+        nested,
+        _unquote(nested),
+        _BACKSLASH_ESCAPE_RE.sub(r"\1", nested),
+        _BACKSLASH_ESCAPE_RE.sub(r"\1", _unquote(nested)),
     )
     for variant in variants:
         if _CRON_CRED_PATH_RE.search(variant) or _glob_could_reach_credentials(variant):
