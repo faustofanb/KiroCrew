@@ -6,10 +6,20 @@
   "author": "praxiscode",
   "license": "Apache-2.0",
   "iconUrl": "/app-assets/praxis-insight/icon.svg",
-  "tags": ["praxis", "work", "approvals", "evidence", "governance"],
+  "tags": [
+    "praxis",
+    "work",
+    "approvals",
+    "evidence",
+    "governance"
+  ],
   "defaultEnabled": true,
   "platform": {
-    "os": ["macos", "linux", "windows"]
+    "os": [
+      "macos",
+      "linux",
+      "windows"
+    ]
   },
   "minKiroCrewVersion": "0.1.0",
   "backend": {
@@ -37,5 +47,11 @@
   "permissions": {
     "api": [],
     "events": []
-  }
+  },
+  "agents": [
+    "agents/praxis-operator.json"
+  ],
+  "skills": [
+    "skills/praxis-domain"
+  ]
 }
