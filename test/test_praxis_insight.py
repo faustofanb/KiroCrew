@@ -71,3 +71,65 @@ def test_every_status_word_has_a_legal_next_or_is_terminal():
 
     for word in STATUS_WORDS:
         assert word in mod._LIFECYCLE, f"{word} has no lifecycle entry"
+
+
+# ── ChangeSet / 多仓变更管理（仿 fork）── ────────────────────────────────────
+
+def test_changeset_divergence_requires_explicit_adjudication(sim):
+    with pytest.raises(PermissionError):
+        sim.promote_delivery("dl-302", "TEST")  # diverged cs-102 blocks promotion
+    result = sim.resolve_divergence("cs-102", "rebase")
+    assert result["changeset"]["status"] == "RECONCILED"
+    assert result["changeset"]["divergence"] is None
+
+
+def test_fork_sync_preserves_candidate_identity_while_commit_moves(sim):
+    before = {rc.repo: rc.candidate_id for rc in sim.changesets[0].repos}
+    heads_before = {rc.repo: rc.head.commit_sha for rc in sim.changesets[0].repos}
+    sim.sync_fork("cs-101")
+    after = {rc.repo: rc.candidate_id for rc in sim.changesets[0].repos}
+    heads_after = {rc.repo: rc.head.commit_sha for rc in sim.changesets[0].repos}
+    # Candidate identity is stable across a fork sync; the commit is not.
+    assert before == after
+    assert heads_before != heads_after
+
+
+def test_rebase_adjudication_adds_revision_under_same_candidate(sim):
+    stale = next(rc for rc in sim.changesets[1].repos if rc.candidate_id == "cr-10")
+    n_before = len(stale.revisions)
+    sim.resolve_divergence("cs-102", "rebase")
+    assert len(stale.revisions) == n_before + 1
+    assert stale.candidate_id == "cr-10"
+    assert stale.revisions[-1].parent_id == "r-10.1"
+
+
+def test_non_diverged_changeset_cannot_be_adjudicated(sim):
+    with pytest.raises(PermissionError):
+        sim.resolve_divergence("cs-101", "rebase")
+
+
+# ── Delivery / CI-CD（E13 硬门）── ──────────────────────────────────────────
+
+def test_prod_requires_real_test_evidence(sim):
+    sim.resolve_divergence("cs-102", "rebase")  # unblock cs-102 first
+    with pytest.raises(PermissionError, match="no real TEST evidence"):
+        sim.promote_delivery("dl-302", "TEST")
+    assert next(d for d in sim.deliveries if d.id == "dl-302").status == "ACCEPTED"  # stays pending
+
+
+def test_delivery_lifecycle_is_ordered(sim):
+    # Cannot skip: PROD directly from ACCEPTED is refused even WITH evidence.
+    with pytest.raises(PermissionError, match="TEST_QUALIFIED"):
+        sim.promote_delivery("dl-301", "PROD")
+    assert sim.promote_delivery("dl-301", "TEST")["delivery"]["status"] == "TEST_QUALIFIED"
+    assert sim.promote_delivery("dl-301", "PROD")["delivery"]["status"] == "DELIVERED"
+    assert sim.promote_delivery("dl-301", "CLOSE")["delivery"]["status"] == "CLOSED"
+    with pytest.raises(PermissionError):  # terminal
+        sim.promote_delivery("dl-301", "CLOSE")
+
+
+def test_delivery_is_not_deployment_and_not_every_accept_ships(sim):
+    # ACCEPTED != DELIVERED != CLOSED are distinct states; a fresh delivery sits at ACCEPTED
+    statuses = {d.status for d in sim.deliveries}
+    assert "ACCEPTED" in statuses
+    assert "DELIVERED" not in statuses and "CLOSED" not in statuses

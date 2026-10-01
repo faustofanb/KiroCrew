@@ -148,6 +148,99 @@ class EvidenceSim:
 
 
 @dataclass
+class CandidateRevisionSim:
+    """One revision in a candidate's lineage.
+
+    The CANDIDATE identity is stable across rebases; the COMMIT it points at
+    is not. Working State, RepoChange, CandidateRevision and Commit/PR/Branch
+    are four different identities in the Praxis model and none may be collapsed
+    into another.
+    """
+
+    id: str
+    parent_id: str | None
+    commit_sha: str
+    note: str = ""
+
+    def to_json(self) -> dict:
+        return {"id": self.id, "parentId": self.parent_id, "commitSha": self.commit_sha, "note": self.note}
+
+
+@dataclass
+class RepoChangeSim:
+    """A ChangeSet's projection into ONE repository."""
+
+    repo: str
+    base: str
+    candidate_id: str
+    revisions: list[CandidateRevisionSim] = field(default_factory=list)
+
+    @property
+    def head(self) -> CandidateRevisionSim:
+        return self.revisions[-1]
+
+    def to_json(self) -> dict:
+        return {
+            "repo": self.repo,
+            "base": self.base,
+            "candidateId": self.candidate_id,
+            "headCommit": self.head.commit_sha,
+            "revisions": [r.to_json() for r in self.revisions],
+        }
+
+
+@dataclass
+class ChangeSetSim:
+    """A cross-repository change as ONE atomic semantic unit.
+
+    Its fork is a managed WORKTREE SET (one per repository), not a social
+    GitHub fork: an isolated execution environment owned by the change. A
+    ChangeSet whose repos have drifted apart is DIVERGED, and divergence is
+    adjudicated EXPLICITLY — never silently rebased away.
+    """
+
+    id: str
+    title: str
+    status: str  # OPEN | DIVERGED | RECONCILED | MERGED | CLOSED
+    repos: list[RepoChangeSim] = field(default_factory=list)
+    worktrees: list[str] = field(default_factory=list)
+    divergence: str | None = None
+
+    def to_json(self) -> dict:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "status": self.status,
+            "repos": [rc.to_json() for rc in self.repos],
+            "worktrees": self.worktrees,
+            "divergence": self.divergence,
+        }
+
+
+@dataclass
+class DeliverySim:
+    """The delivery lifecycle of a ChangeSet.
+
+    Delivery is NOT deployment, ACCEPTED is not DELIVERED, and DELIVERED is
+    not Closed. PROD promotion requires REAL TEST evidence; without it the
+    delivery must STAY qualification-pending (E13 hard gate).
+    """
+
+    id: str
+    changeset_id: str
+    status: str  # ACCEPTED | TEST_QUALIFIED | DELIVERED | CLOSED
+    has_test_evidence: bool
+
+    def to_json(self) -> dict:
+        return {
+            "id": self.id,
+            "changesetId": self.changeset_id,
+            "status": self.status,
+            "hasTestEvidence": self.has_test_evidence,
+        }
+
+
+@dataclass
 class UnknownSim:
     operation_id: str
     last_fact: str
@@ -248,6 +341,59 @@ class PraxisSimulator:
             AgentRunSim("r-3290", "w-015", "worker-3", "RUNNING", ["epoch-c1", "epoch-c2"]),
             AgentRunSim("r-3265", "w-021", "worker-1", "DELIVERED", ["epoch-d1"]),
         ]
+        self.changesets = [
+            ChangeSetSim(
+                id="cs-101",
+                title="跨仓审批卡改造",
+                status="OPEN",
+                repos=[
+                    RepoChangeSim(
+                        repo="praxiscode",
+                        base="main",
+                        candidate_id="cr-7",
+                        revisions=[
+                            CandidateRevisionSim("r-7.1", None, "abc1234", "初稿"),
+                            CandidateRevisionSim("r-7.2", "r-7.1", "9f01e2d", "语义对齐后 rebase"),
+                        ],
+                    ),
+                    RepoChangeSim(
+                        repo="praxis-web",
+                        base="main",
+                        candidate_id="cr-8",
+                        revisions=[CandidateRevisionSim("r-8.1", None, "77c0ffe", "审批卡渲染")],
+                    ),
+                ],
+                worktrees=[".worktrees/cs-101/praxiscode", ".worktrees/cs-101/praxis-web"],
+            ),
+            ChangeSetSim(
+                id="cs-102",
+                title="API 契约同步",
+                status="DIVERGED",
+                repos=[
+                    RepoChangeSim(
+                        repo="praxiscode",
+                        base="main",
+                        candidate_id="cr-9",
+                        revisions=[
+                            CandidateRevisionSim("r-9.1", None, "3ab99de", "契约更新"),
+                            CandidateRevisionSim("r-9.2", "r-9.1", "5d2c8aa", "已 rebase 到新契约"),
+                        ],
+                    ),
+                    RepoChangeSim(
+                        repo="praxis-web",
+                        base="main",
+                        candidate_id="cr-10",
+                        revisions=[CandidateRevisionSim("r-10.1", None, "0ld444b", "仍基于旧契约基线")],
+                    ),
+                ],
+                worktrees=[".worktrees/cs-102/praxiscode", ".worktrees/cs-102/praxis-web"],
+                divergence="praxiscode 候选已 rebase 到新契约，praxis-web 候选仍基于旧基线——跨仓一致性破坏，须显式裁决，不得静默合并。",
+            ),
+        ]
+        self.deliveries = [
+            DeliverySim(id="dl-301", changeset_id="cs-101", status="ACCEPTED", has_test_evidence=True),
+            DeliverySim(id="dl-302", changeset_id="cs-102", status="ACCEPTED", has_test_evidence=False),
+        ]
         self.evidence = [
             EvidenceSim("ev-1", "w-012", "E06-B2 审批契约章节", "product_fact"),
             EvidenceSim("ev-2", "w-012", "作用域降级影响面清单", "agent_inference"),
@@ -275,11 +421,111 @@ class PraxisSimulator:
             "works": [w.to_json() for w in self.works],
             "approvals": [a.to_json() for a in self.approvals],
             "runs": [r.to_json() for r in self.runs],
+            "changesets": [c.to_json() for c in self.changesets],
+            "deliveries": [d.to_json() for d in self.deliveries],
             "evidence": [e.to_json() for e in self.evidence],
             "unknowns": [u.to_json() for u in self.unknowns],
         }
 
     # ── Mutations (each maps one-to-one onto a future praxisd command) ──────
+
+    def resolve_divergence(self, changeset_id: str, decision: str) -> dict:
+        """Adjudicate a DIVERGED ChangeSet explicitly.
+
+        ``rebase`` re-seats the stale repos onto the advanced candidate's base
+        (a NEW revision under the SAME candidate id — identity is stable, the
+        commit is not); ``accept`` adopts the advanced state as-is; ``reject``
+        closes the ChangeSet without merging. A non-diverged ChangeSet has
+        nothing to adjudicate and is refused.
+        """
+        if decision not in ("rebase", "accept", "reject"):
+            raise ValueError("decision must be 'rebase' | 'accept' | 'reject'")
+        cs = next((c for c in self.changesets if c.id == changeset_id), None)
+        if cs is None:
+            raise KeyError(changeset_id)
+        if cs.status != "DIVERGED" or not cs.divergence:
+            raise PermissionError(f"changeset {changeset_id} is not diverged")
+        if decision == "reject":
+            cs.status = "CLOSED"
+        else:
+            if decision == "rebase":
+                advanced = max(cs.repos, key=lambda rc: len(rc.revisions))
+                for rc in cs.repos:
+                    if rc is advanced:
+                        continue
+                    parent = rc.head.id
+                    rc.revisions.append(
+                        CandidateRevisionSim(
+                            id=f"{rc.candidate_id}.sync",
+                            parent_id=parent,
+                            commit_sha=f"syn{rc.head.commit_sha[-4:]}",
+                            note=f"rebase 到 {advanced.candidate_id} 的新基线",
+                        )
+                    )
+            cs.status = "RECONCILED"
+        cs.divergence = None
+        return {"changeset": cs.to_json()}
+
+    def sync_fork(self, changeset_id: str) -> dict:
+        """Pull upstream base into the ChangeSet's worktree set.
+
+        The fork syncs; the CANDIDATE identity does not move. Each repo gains
+        one revision under its existing candidate id.
+        """
+        cs = next((c for c in self.changesets if c.id == changeset_id), None)
+        if cs is None:
+            raise KeyError(changeset_id)
+        if cs.status == "CLOSED":
+            raise PermissionError(f"changeset {changeset_id} is closed")
+        for rc in cs.repos:
+            rc.revisions.append(
+                CandidateRevisionSim(
+                    id=f"{rc.candidate_id}.f{len(rc.revisions) + 1}",
+                    parent_id=rc.head.id,
+                    commit_sha=f"f{len(rc.revisions) + 1:04d}{rc.head.commit_sha[-3:]}",
+                    note="fork 同步上游基线",
+                )
+            )
+        return {"changeset": cs.to_json()}
+
+    def promote_delivery(self, delivery_id: str, action: str) -> dict:
+        """Advance a delivery along ACCEPTED -> TEST_QUALIFIED -> DELIVERED -> CLOSED.
+
+        The E13 hard gate, enforced structurally: TEST promotion requires REAL
+        test evidence — without it the delivery must STAY qualification
+        pending (a PermissionError, never a silent skip); PROD promotion
+        requires TEST_QUALIFIED; and a delivery whose ChangeSet is DIVERGED
+        cannot promote at all, because cross-repo consistency is a
+        precondition of shipping, not a nice-to-have.
+        """
+        if action not in ("TEST", "PROD", "CLOSE"):
+            raise ValueError("action must be 'TEST' | 'PROD' | 'CLOSE'")
+        dl = next((d for d in self.deliveries if d.id == delivery_id), None)
+        if dl is None:
+            raise KeyError(delivery_id)
+        cs = next(c for c in self.changesets if c.id == dl.changeset_id)
+        if action == "CLOSE":
+            if dl.status != "DELIVERED":
+                raise PermissionError(f"delivery {delivery_id} is {dl.status}; only DELIVERED closes")
+            dl.status = "CLOSED"
+            return {"delivery": dl.to_json()}
+        if cs.status == "DIVERGED":
+            raise PermissionError(
+                f"changeset {cs.id} is diverged; adjudicate the divergence before promoting"
+            )
+        if action == "TEST":
+            if dl.status != "ACCEPTED":
+                raise PermissionError(f"delivery {delivery_id} is {dl.status}, not ACCEPTED")
+            if not dl.has_test_evidence:
+                raise PermissionError(
+                    f"delivery {delivery_id} has no real TEST evidence; qualification stays pending"
+                )
+            dl.status = "TEST_QUALIFIED"
+        else:  # PROD
+            if dl.status != "TEST_QUALIFIED":
+                raise PermissionError(f"delivery {delivery_id} is {dl.status}; PROD needs TEST_QUALIFIED")
+            dl.status = "DELIVERED"
+        return {"delivery": dl.to_json()}
 
     def decide_approval(self, approval_id: str, decision: str) -> dict:
         if decision not in ("accepted", "rejected"):

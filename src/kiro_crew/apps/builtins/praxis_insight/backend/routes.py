@@ -83,6 +83,50 @@ async def _handle_decide(request: web.Request) -> web.Response:
 
 
 @_guarded
+async def _handle_resolve_divergence(request: web.Request) -> web.Response:
+    changeset_id = request.match_info["changeset_id"]
+    body = await request.json() if request.can_read_body else {}
+    decision = body.get("decision")
+    try:
+        result = _SIM.resolve_divergence(changeset_id, decision)
+    except ValueError:
+        return _json({"error": "decision must be 'rebase' | 'accept' | 'reject'", "code": "bad_request"}, 400)
+    except KeyError:
+        return _json({"error": f"no changeset {changeset_id}", "code": "not_found"}, 404)
+    except PermissionError as exc:
+        return _json({"error": str(exc), "code": "not_diverged"}, 409)
+    return _json(result)
+
+
+@_guarded
+async def _handle_sync_fork(request: web.Request) -> web.Response:
+    changeset_id = request.match_info["changeset_id"]
+    try:
+        result = _SIM.sync_fork(changeset_id)
+    except KeyError:
+        return _json({"error": f"no changeset {changeset_id}", "code": "not_found"}, 404)
+    except PermissionError as exc:
+        return _json({"error": str(exc), "code": "closed"}, 409)
+    return _json(result)
+
+
+@_guarded
+async def _handle_promote(request: web.Request) -> web.Response:
+    delivery_id = request.match_info["delivery_id"]
+    body = await request.json() if request.can_read_body else {}
+    action = body.get("action")
+    try:
+        result = _SIM.promote_delivery(delivery_id, action)
+    except ValueError:
+        return _json({"error": "action must be 'TEST' | 'PROD' | 'CLOSE'", "code": "bad_request"}, 400)
+    except KeyError:
+        return _json({"error": f"no delivery {delivery_id}", "code": "not_found"}, 404)
+    except PermissionError as exc:
+        return _json({"error": str(exc), "code": "gate_refused"}, 409)
+    return _json(result)
+
+
+@_guarded
 async def _handle_advance(request: web.Request) -> web.Response:
     work_id = request.match_info["work_id"]
     try:
@@ -100,3 +144,6 @@ def register_routes(app: web.Application) -> None:
     r.add_get(f"{_BASE}/state", _handle_state)
     r.add_post(f"{_BASE}/approvals/{{approval_id}}/decide", _handle_decide)
     r.add_post(f"{_BASE}/works/{{work_id}}/advance", _handle_advance)
+    r.add_post(f"{_BASE}/changesets/{{changeset_id}}/resolve-divergence", _handle_resolve_divergence)
+    r.add_post(f"{_BASE}/changesets/{{changeset_id}}/sync-fork", _handle_sync_fork)
+    r.add_post(f"{_BASE}/deliveries/{{delivery_id}}/promote", _handle_promote)

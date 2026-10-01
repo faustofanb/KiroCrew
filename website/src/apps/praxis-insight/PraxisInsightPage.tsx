@@ -43,6 +43,26 @@ type Snapshot = {
     reconciliation: string
     safeCommand: string
   }[]
+  changesets: {
+    id: string
+    title: string
+    status: 'OPEN' | 'DIVERGED' | 'RECONCILED' | 'MERGED' | 'CLOSED'
+    repos: {
+      repo: string
+      base: string
+      candidateId: string
+      headCommit: string
+      revisions: { id: string; parentId: string | null; commitSha: string; note: string }[]
+    }[]
+    worktrees: string[]
+    divergence: string | null
+  }[]
+  deliveries: {
+    id: string
+    changesetId: string
+    status: 'ACCEPTED' | 'TEST_QUALIFIED' | 'DELIVERED' | 'CLOSED'
+    hasTestEvidence: boolean
+  }[]
 }
 
 /** One visual treatment per word. No two words share a color — a state that
@@ -61,6 +81,25 @@ const STATUS_STYLE: Record<StatusWord, string> = {
   STALE: 'text-muted border-border/60',
   ACCEPTED: 'text-ok border-ok',
   DELIVERED: 'text-ok border-ok border-2',
+}
+
+const CS_STYLE: Record<string, string> = {
+  OPEN: 'text-accent border-accent',
+  DIVERGED: 'text-danger border-danger border-dashed',
+  RECONCILED: 'text-ok border-ok',
+  MERGED: 'text-ok border-ok',
+  CLOSED: 'text-muted border-border/60',
+}
+
+const DL_STYLE: Record<string, string> = {
+  ACCEPTED: 'text-warn border-warn',
+  TEST_QUALIFIED: 'text-info border-info',
+  DELIVERED: 'text-ok border-ok border-2',
+  CLOSED: 'text-muted border-border/60',
+}
+
+const DL_ZH: Record<string, string> = {
+  ACCEPTED: '已接受', TEST_QUALIFIED: 'TEST 已鉴证', DELIVERED: '已交付', CLOSED: '已关闭',
 }
 
 const STATUS_ZH: Record<StatusWord, string> = {
@@ -128,6 +167,26 @@ export default function PraxisInsightPage() {
       .catch((e) => setError(String(e)))
       .finally(() => setBusy(null))
   }
+
+  const post = (path: string, body: object, tag: string, done: () => void) => {
+    setBusy(tag)
+    fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then((r) => (r.ok ? r.json() : r.json().then((b) => Promise.reject(new Error(b.error ?? `HTTP ${r.status}`)))))
+      .then(() => { done(); load() })
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusy(null))
+  }
+
+  const resolveDivergence = (id: string, decision: 'rebase' | 'accept' | 'reject') =>
+    post(`/api/apps/praxis-insight/changesets/${id}/resolve-divergence`, { decision }, `${id}:${decision}`, () => {})
+  const syncFork = (id: string) =>
+    post(`/api/apps/praxis-insight/changesets/${id}/sync-fork`, {}, `${id}:sync`, () => {})
+  const promote = (id: string, action: 'TEST' | 'PROD' | 'CLOSE') =>
+    post(`/api/apps/praxis-insight/deliveries/${id}/promote`, { action }, `${id}:${action}`, () => {})
 
   const advance = (id: string) => {
     setBusy(`${id}:advance`)
@@ -253,6 +312,91 @@ export default function PraxisInsightPage() {
               </div>
             </div>
           ))}
+        </div>
+      </section>
+
+      {/* 3.5 多仓变更管理：ChangeSet / 仿 fork */}
+      <section className="mb-6">
+        <SectionTitle hint="跨仓原子单元 · fork = 受管 worktree 集 · 分歧须显式裁决">多仓变更 · ChangeSet</SectionTitle>
+        <div className="grid gap-3 xl:grid-cols-2">
+          {snap.changesets.map((cs) => (
+            <div key={cs.id} className={`rounded-lg border p-3.5 ${cs.status === 'DIVERGED' ? 'border-danger bg-danger-subtle' : 'border-border bg-card'}`}>
+              <div className="flex items-center gap-2">
+                <span className={`inline-flex h-5 items-center rounded border px-1.5 font-mono text-[10px] ${CS_STYLE[cs.status]}`}>{cs.status}</span>
+                <span className="truncate text-[13.5px] font-medium text-text-strong">{cs.id} · {cs.title}</span>
+                <button
+                  disabled={busy !== null || cs.status === 'CLOSED'}
+                  className="ml-auto shrink-0 rounded-md border border-border px-2 py-0.5 text-[11px] text-muted hover:bg-bg-hover disabled:opacity-40"
+                  onClick={() => syncFork(cs.id)}
+                  title="把上游基线拉进该变更的 fork worktree 集"
+                >{busy === `${cs.id}:sync` ? '…' : '同步 fork'}</button>
+              </div>
+              <div className="mt-1 font-mono text-[10.5px] text-muted">
+                {cs.worktrees.map((w) => <span key={w} className="mr-3">⎇ {w}</span>)}
+              </div>
+              <div className="mt-2 space-y-1">
+                {cs.repos.map((rc) => (
+                  <div key={rc.repo} className="flex items-center gap-2 font-mono text-[11.5px]">
+                    <span className="w-24 shrink-0 truncate text-text">{rc.repo}</span>
+                    <span className="text-muted">{rc.base}</span>
+                    <span className="text-muted">→</span>
+                    <span className="text-accent">{rc.candidateId}</span>
+                    <span className="text-muted">@{rc.headCommit.slice(0, 7)}</span>
+                    <span className="ml-auto text-[10px] text-muted">{rc.revisions.length} 修订</span>
+                  </div>
+                ))}
+              </div>
+              {cs.divergence && (
+                <div className="mt-2.5 rounded border border-dashed border-danger bg-bg px-3 py-2">
+                  <div className="text-[12px] text-danger">跨仓分歧：{cs.divergence}</div>
+                  <div className="mt-2 flex justify-end gap-2">
+                    <button disabled={busy !== null} className="rounded-md border border-border px-2.5 py-0.5 text-[11.5px] text-muted hover:bg-bg-hover disabled:opacity-40" onClick={() => resolveDivergence(cs.id, 'reject')}>关闭不合并</button>
+                    <button disabled={busy !== null} className="rounded-md border border-border px-2.5 py-0.5 text-[11.5px] text-muted hover:bg-bg-hover disabled:opacity-40" onClick={() => resolveDivergence(cs.id, 'accept')}>采纳新基线</button>
+                    <button disabled={busy !== null} className="rounded-md bg-accent px-2.5 py-0.5 text-[11.5px] text-accent-fg hover:opacity-90 disabled:opacity-40" onClick={() => resolveDivergence(cs.id, 'rebase')}>
+                      {busy === `${cs.id}:rebase` ? '…' : 'rebase 对齐'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* 3.6 CI/CD：Delivery 生命周期 */}
+      <section className="mb-6">
+        <SectionTitle hint="Delivery ≠ Deployment · PROD 需真实 TEST 证据 · 分歧未裁决不得交付">CI/CD · Delivery</SectionTitle>
+        <div className="rounded-lg border border-border bg-card">
+          {snap.deliveries.map((dl) => {
+            const cs = snap.changesets.find((c) => c.id === dl.changesetId)
+            return (
+              <div key={dl.id} className="flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-2.5 last:border-b-0">
+                <span className={`inline-flex h-5 items-center rounded border px-1.5 font-mono text-[10px] ${DL_STYLE[dl.status]}`}>{dl.status}<span className="ml-1 font-sans text-[9px] opacity-70">{DL_ZH[dl.status]}</span></span>
+                <span className="text-[13px] font-medium text-text-strong">{dl.id}</span>
+                <span className="text-[11.5px] text-muted">← {dl.changesetId}{cs ? ` · ${cs.title}` : ''}</span>
+                <span className={`rounded px-1.5 py-0.5 text-[10px] ${dl.hasTestEvidence ? 'bg-ok-subtle text-ok' : 'bg-warn-subtle text-warn'}`}>
+                  {dl.hasTestEvidence ? 'TEST 证据 ✓' : '缺 TEST 证据 · qualification pending'}
+                </span>
+                <div className="ml-auto flex gap-2">
+                  {dl.status === 'ACCEPTED' && (
+                    <button disabled={busy !== null} className="rounded-md border border-border px-2.5 py-0.5 text-[11.5px] text-muted hover:bg-bg-hover disabled:opacity-40" onClick={() => promote(dl.id, 'TEST')} title="凭真实 TEST 证据鉴证；缺失则拒绝并保持 pending">
+                      {busy === `${dl.id}:TEST` ? '…' : 'TEST 鉴证'}
+                    </button>
+                  )}
+                  {dl.status === 'TEST_QUALIFIED' && (
+                    <button disabled={busy !== null} className="rounded-md bg-accent px-2.5 py-0.5 text-[11.5px] text-accent-fg hover:opacity-90 disabled:opacity-40" onClick={() => promote(dl.id, 'PROD')}>
+                      {busy === `${dl.id}:PROD` ? '…' : '交付 PROD'}
+                    </button>
+                  )}
+                  {dl.status === 'DELIVERED' && (
+                    <button disabled={busy !== null} className="rounded-md border border-border px-2.5 py-0.5 text-[11.5px] text-muted hover:bg-bg-hover disabled:opacity-40" onClick={() => promote(dl.id, 'CLOSE')}>
+                      {busy === `${dl.id}:CLOSE` ? '…' : '关闭'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )
+          })}
         </div>
       </section>
 
