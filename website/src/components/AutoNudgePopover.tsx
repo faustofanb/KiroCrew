@@ -43,12 +43,12 @@ interface Props {
  * the loop's `stop_sentinel_path`). It must travel to `/api/autonudge`
  * verbatim -- substituting it in the form would leave the server nothing to
  * replace -- so the textarea keeps the raw token and the help line under it
- * explains what the token becomes (#10458). `DEFAULT_MSG` below ends with this
- * exact spelling; a test pins that the template still carries it.
+ * explains what the token becomes (#10458). A goal typed with the token still
+ * works; `DEFAULT_MSG` below names the `autonudge_stop` tool instead.
  */
 export const STOP_FILE_TOKEN = '{{STOP_FILE}}'
 
-const DEFAULT_MSG = `Your north star is in north_star.md, roadmap in roadmap.md, tasks in tasks.md. Pick the single highest-leverage next step toward the goal and execute it. Update tasks.md. Post a blocker ONCE if genuinely stuck. To halt the loop, create {{STOP_FILE}}`
+const DEFAULT_MSG = `Your north star is in north_star.md, roadmap in roadmap.md, tasks in tasks.md. Pick the single highest-leverage next step toward the goal and execute it. Update tasks.md. Post a blocker ONCE if genuinely stuck. When the goal is met, call the autonudge_stop tool to halt the loop.`
 
 /** One armed script cron owned by this chat slot. */
 interface SlotWatch {
