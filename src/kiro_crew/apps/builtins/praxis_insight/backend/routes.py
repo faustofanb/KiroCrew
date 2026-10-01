@@ -138,6 +138,154 @@ async def _handle_advance(request: web.Request) -> web.Response:
     return _json(result)
 
 
+# ── Fork 工作台（真实 git）──
+
+@_guarded
+async def _git_root_get(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_forks
+
+    try:
+        return _json({"root": await asyncio.to_thread(git_forks.get_root)})
+    except Exception as exc:
+        return _json({"error": str(exc), "code": "error"}, 500)
+
+
+@_guarded
+async def _git_root_set(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_forks
+
+    body = await request.json() if request.can_read_body else {}
+    try:
+        return _json(await asyncio.to_thread(git_forks.set_root, body.get("root", "")))
+    except FileNotFoundError as exc:
+        return _json({"error": f"no such directory: {exc}", "code": "bad_root"}, 400)
+
+
+@_guarded
+async def _git_repos(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_forks
+
+    try:
+        return _json(await asyncio.to_thread(git_forks.scan_repos))
+    except PermissionError as exc:
+        return _json({"error": str(exc), "code": "root_not_set"}, 400)
+
+
+@_guarded
+async def _git_forks_list(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_forks
+
+    return _json(await asyncio.to_thread(git_forks.list_forks))
+
+
+@_guarded
+async def _git_fork_create(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_forks
+
+    body = await request.json() if request.can_read_body else {}
+    try:
+        return _json(
+            await asyncio.to_thread(
+                git_forks.create_fork, body.get("repos") or [], body.get("base", "main"), body.get("title", "")
+            )
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        return _json({"error": str(exc), "code": "bad_request"}, 400)
+    except (PermissionError, RuntimeError) as exc:
+        return _json({"error": str(exc), "code": "git_error"}, 409)
+
+
+@_guarded
+async def _git_fork_sync(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_forks
+
+    fid = request.match_info["fork_id"]
+    body = await request.json() if request.can_read_body else {}
+    try:
+        if body.get("op") == "continue":
+            return _json(await asyncio.to_thread(git_forks.rebase_continue, fid, False))
+        if body.get("op") == "abort":
+            return _json(await asyncio.to_thread(git_forks.rebase_continue, fid, True))
+        return _json(await asyncio.to_thread(git_forks.sync_fork, fid))
+    except KeyError:
+        return _json({"error": f"no fork {fid}", "code": "not_found"}, 404)
+    except RuntimeError as exc:
+        return _json({"error": str(exc), "code": "git_error"}, 409)
+
+
+@_guarded
+async def _git_fork_commit(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_forks
+
+    fid = request.match_info["fork_id"]
+    body = await request.json() if request.can_read_body else {}
+    try:
+        return _json(
+            await asyncio.to_thread(git_forks.commit_fork, fid, body.get("repo", ""), body.get("message", ""))
+        )
+    except ValueError as exc:
+        return _json({"error": str(exc), "code": "bad_request"}, 400)
+    except KeyError:
+        return _json({"error": "no such fork/repo", "code": "not_found"}, 404)
+    except RuntimeError as exc:
+        return _json({"error": str(exc), "code": "git_error"}, 409)
+
+
+@_guarded
+async def _git_fork_diff(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_forks
+
+    try:
+        return _json(await asyncio.to_thread(git_forks.diff_fork, request.match_info["fork_id"]))
+    except KeyError:
+        return _json({"error": "no such fork", "code": "not_found"}, 404)
+
+
+@_guarded
+async def _git_fork_merge(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_forks
+
+    try:
+        return _json(await asyncio.to_thread(git_forks.merge_fork, request.match_info["fork_id"]))
+    except KeyError:
+        return _json({"error": "no such fork", "code": "not_found"}, 404)
+
+
+@_guarded
+async def _git_fork_close(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_forks
+
+    body = await request.json() if request.can_read_body else {}
+    try:
+        return _json(
+            await asyncio.to_thread(
+                git_forks.close_fork, request.match_info["fork_id"], bool(body.get("deleteBranch", True))
+            )
+        )
+    except KeyError:
+        return _json({"error": "no such fork", "code": "not_found"}, 404)
+
+
 def register_routes(app: web.Application) -> None:
     """Register on the gateway's aiohttp Application (single-arg convention)."""
     r = app.router
@@ -147,3 +295,14 @@ def register_routes(app: web.Application) -> None:
     r.add_post(f"{_BASE}/changesets/{{changeset_id}}/resolve-divergence", _handle_resolve_divergence)
     r.add_post(f"{_BASE}/changesets/{{changeset_id}}/sync-fork", _handle_sync_fork)
     r.add_post(f"{_BASE}/deliveries/{{delivery_id}}/promote", _handle_promote)
+    # Fork 工作台（真实 git）
+    r.add_get(f"{_BASE}/git/root", _git_root_get)
+    r.add_put(f"{_BASE}/git/root", _git_root_set)
+    r.add_get(f"{_BASE}/git/repos", _git_repos)
+    r.add_get(f"{_BASE}/git/forks", _git_forks_list)
+    r.add_post(f"{_BASE}/git/forks", _git_fork_create)
+    r.add_post(f"{_BASE}/git/forks/{{fork_id}}/sync", _git_fork_sync)
+    r.add_post(f"{_BASE}/git/forks/{{fork_id}}/commit", _git_fork_commit)
+    r.add_get(f"{_BASE}/git/forks/{{fork_id}}/diff", _git_fork_diff)
+    r.add_post(f"{_BASE}/git/forks/{{fork_id}}/merge", _git_fork_merge)
+    r.add_post(f"{_BASE}/git/forks/{{fork_id}}/close", _git_fork_close)

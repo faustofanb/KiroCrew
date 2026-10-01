@@ -65,6 +65,17 @@ type Snapshot = {
   }[]
 }
 
+type GitRepo = { name: string; branch: string; dirty: number }
+type GitForkRepoState = {
+  repo: string; branch: string; base: string
+  ahead: number; behind: number; dirty: number; rebasing: boolean; conflict: boolean
+}
+type GitFork = {
+  fork: { id: string; title: string; status: string; note: string; repos: { repo: string; worktree: string; branch: string; base: string }[] }
+  repoStates: GitForkRepoState[]
+}
+type GitDiff = { repos: { repo: string; stat: string; patch: string }[] }
+
 /** One visual treatment per word. No two words share a color — a state that
  *  cannot be told apart at a glance gets collapsed in the operator's head. */
 const STATUS_STYLE: Record<StatusWord, string> = {
@@ -187,6 +198,73 @@ export default function PraxisInsightPage() {
     post(`/api/apps/praxis-insight/changesets/${id}/sync-fork`, {}, `${id}:sync`, () => {})
   const promote = (id: string, action: 'TEST' | 'PROD' | 'CLOSE') =>
     post(`/api/apps/praxis-insight/deliveries/${id}/promote`, { action }, `${id}:${action}`, () => {})
+
+  // ── Fork 工作台（真实 git）──
+  const [gitRoot, setGitRoot] = useState('')
+  const [rootInput, setRootInput] = useState('')
+  const [gitRepos, setGitRepos] = useState<GitRepo[] | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [baseBranch, setBaseBranch] = useState('main')
+  const [forks, setForks] = useState<GitFork[] | null>(null)
+  const [diffs, setDiffs] = useState<Record<string, GitDiff | 'loading'>>({})
+
+  const gitRefresh = useCallback(() => {
+    fetch('/api/apps/praxis-insight/git/forks')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d) => { setForks(d.forks); setGitRoot(d.root); if (!rootInput && d.root) setRootInput(d.root) })
+      .catch(() => setForks([]))
+  }, [rootInput])
+  useEffect(() => { gitRefresh() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const gitPost = (path: string, body: object, tag: string) => {
+    setBusy(tag)
+    fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then((r) => (r.ok ? r.json() : r.json().then((b) => Promise.reject(new Error(b.error ?? `HTTP ${r.status}`)))))
+      .then(() => gitRefresh())
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusy(null))
+  }
+
+  const saveRoot = () => {
+    setBusy('root')
+    fetch('/api/apps/praxis-insight/git/root', {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ root: rootInput }),
+    })
+      .then((r) => (r.ok ? r.json() : r.json().then((b) => Promise.reject(new Error(b.error ?? `HTTP ${r.status}`)))))
+      .then(() => fetch('/api/apps/praxis-insight/git/repos').then((r) => r.json()))
+      .then((d) => { setGitRepos(d.repos); setGitRoot(d.root); setError(null) })
+      .catch((e) => setError(String(e)))
+      .finally(() => setBusy(null))
+  }
+  const scanRepos = () => {
+    fetch('/api/apps/praxis-insight/git/repos')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d) => setGitRepos(d.repos))
+      .catch((e) => setError(String(e)))
+  }
+  const toggleRepo = (name: string) => {
+    setSelected((prev) => { const n = new Set(prev); if (n.has(name)) n.delete(name); else n.add(name); return n })
+  }
+  const createFork = () => {
+    if (!selected.size) { setError('先勾选至少一个仓库'); return }
+    gitPost('/api/apps/praxis-insight/git/forks', { repos: [...selected], base: baseBranch, title: `fork ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` }, 'create-fork')
+  }
+  const commitRepo = (fid: string, repo: string) => {
+    const msg = window.prompt(`提交 ${repo} 的全部改动（fork worktree）`, 'wip')
+    if (!msg) return
+    gitPost(`/api/apps/praxis-insight/git/forks/${fid}/commit`, { repo, message: msg }, `${fid}:${repo}:commit`)
+  }
+  const loadDiff = (fid: string) => {
+    setDiffs((d) => ({ ...d, [fid]: 'loading' }))
+    fetch(`/api/apps/praxis-insight/git/forks/${fid}/diff`)
+      .then((r) => r.json())
+      .then((d) => setDiffs((prev) => ({ ...prev, [fid]: d })))
+      .catch(() => setDiffs((prev) => {
+        const n = { ...prev }
+        delete n[fid]
+        return n
+      }))
+  }
 
   const advance = (id: string) => {
     setBusy(`${id}:advance`)
@@ -313,6 +391,114 @@ export default function PraxisInsightPage() {
             </div>
           ))}
         </div>
+      </section>
+
+      {/* 3.4 Fork 工作台（真实 git 操作） */}
+      <section className="mb-6">
+        <SectionTitle hint="真实 worktree / rebase / merge · 分歧自动检测 · 全程可丢弃">Fork 工作台 · 真实 Git</SectionTitle>
+
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <input
+            value={rootInput}
+            onChange={(e) => setRootInput(e.target.value)}
+            placeholder="工作区根目录（其下每级一层 = 一个 git 仓库）"
+            className="h-8 min-w-72 flex-1 rounded-md border border-border bg-bg px-2.5 font-mono text-[12px] text-text outline-none placeholder:text-muted"
+          />
+          <button disabled={busy !== null} className="h-8 rounded-md border border-border px-3 text-[12px] text-muted hover:bg-bg-hover disabled:opacity-40" onClick={saveRoot}>
+            {busy === 'root' ? '…' : '设为根目录'}
+          </button>
+          {gitRoot && (
+            <button className="h-8 rounded-md border border-border px-3 text-[12px] text-muted hover:bg-bg-hover" onClick={scanRepos}>扫描仓库</button>
+          )}
+        </div>
+
+        {gitRepos && (
+          <div className="mb-3 rounded-lg border border-border bg-card p-3">
+            <div className="mb-2 flex flex-wrap items-center gap-1.5">
+              {gitRepos.map((r) => (
+                <button
+                  key={r.name}
+                  onClick={() => toggleRepo(r.name)}
+                  className={`rounded-md border px-2 py-1 font-mono text-[11.5px] ${selected.has(r.name) ? 'border-accent bg-accent-subtle text-accent' : 'border-border text-muted hover:bg-bg-hover'}`}
+                >
+                  {selected.has(r.name) ? '✓ ' : ''}{r.name}
+                  <span className="ml-1 opacity-60">{r.branch}{r.dirty > 0 ? ` · ${r.dirty}脏` : ''}</span>
+                </button>
+              ))}
+              {gitRepos.length === 0 && <span className="text-[12px] text-muted">根目录下没有 git 仓库</span>}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[11.5px] text-muted">基线分支</span>
+              <input value={baseBranch} onChange={(e) => setBaseBranch(e.target.value)} className="h-7 w-32 rounded border border-border bg-bg px-2 font-mono text-[11.5px] text-text outline-none" />
+              <button disabled={busy !== null} className="ml-auto rounded-md bg-accent px-3 py-1 text-[12px] text-accent-fg hover:opacity-90 disabled:opacity-40" onClick={createFork}>
+                {busy === 'create-fork' ? '创建中…' : `创建 fork（${selected.size} 仓）`}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {forks && forks.length === 0 && gitRoot && <p className="text-[12.5px] text-muted">还没有 fork。勾选仓库创建一个——会在 .kirocrew-forks/ 下生成每仓一个受管 worktree。</p>}
+        {forks?.map(({ fork: f, repoStates }) => (
+          <div key={f.id} className={`mb-2.5 rounded-lg border p-3.5 ${f.status === 'DIVERGED' || f.status === 'CONFLICT' ? 'border-danger bg-danger-subtle' : f.status === 'MERGED' ? 'border-ok bg-card' : 'border-border bg-card'}`}>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={`inline-flex h-5 items-center rounded border px-1.5 font-mono text-[10px] ${CS_STYLE[f.status] ?? 'text-muted border-border'}`}>{f.status}</span>
+              <span className="text-[13.5px] font-medium text-text-strong">{f.id} · {f.title}</span>
+              <span className="font-mono text-[10.5px] text-muted">base {f.repos[0]?.base} · 分支 {f.repos[0]?.branch}</span>
+              <div className="ml-auto flex flex-wrap gap-1.5">
+                {f.status === 'CONFLICT' ? (
+                  <>
+                    <button disabled={busy !== null} className="rounded-md border border-border px-2 py-0.5 text-[11px] text-muted hover:bg-bg-hover disabled:opacity-40" onClick={() => gitPost(`/api/apps/praxis-insight/git/forks/${f.id}/sync`, { op: 'abort' }, `${f.id}:abort`)}>中止 rebase</button>
+                    <button disabled={busy !== null} className="rounded-md bg-accent px-2 py-0.5 text-[11px] text-accent-fg hover:opacity-90 disabled:opacity-40" onClick={() => gitPost(`/api/apps/praxis-insight/git/forks/${f.id}/sync`, { op: 'continue' }, `${f.id}:cont`)}>已解决，继续 rebase</button>
+                  </>
+                ) : f.status !== 'MERGED' && f.status !== 'CLOSED' ? (
+                  <>
+                    <button disabled={busy !== null} className="rounded-md border border-border px-2 py-0.5 text-[11px] text-muted hover:bg-bg-hover disabled:opacity-40" onClick={() => gitPost(`/api/apps/praxis-insight/git/forks/${f.id}/sync`, {}, `${f.id}:sync`)} title="把基线分支 rebase 进各 worktree">同步 rebase</button>
+                    <button disabled={busy !== null} className="rounded-md border border-border px-2 py-0.5 text-[11px] text-muted hover:bg-bg-hover disabled:opacity-40" onClick={() => loadDiff(f.id)}>查看 diff</button>
+                    <button disabled={busy !== null} className="rounded-md bg-accent px-2 py-0.5 text-[11px] text-accent-fg hover:opacity-90 disabled:opacity-40" onClick={() => { if (window.confirm(`把 ${f.id} 合并回基线分支？主检出需在基线上且干净。`)) gitPost(`/api/apps/praxis-insight/git/forks/${f.id}/merge`, {}, `${f.id}:merge`) }}>合并回基线</button>
+                  </>
+                ) : null}
+                {f.status !== 'CLOSED' && (
+                  <button disabled={busy !== null} className="rounded-md border border-border px-2 py-0.5 text-[11px] text-muted hover:bg-bg-hover disabled:opacity-40" onClick={() => { if (window.confirm('关闭并清理该 fork 的全部 worktree（未合并的分支会被删除）？')) gitPost(`/api/apps/praxis-insight/git/forks/${f.id}/close`, { deleteBranch: true }, `${f.id}:close`) }}>
+                    {f.status === 'MERGED' ? '清理 worktree' : '关闭丢弃'}
+                  </button>
+                )}
+              </div>
+            </div>
+            {f.note && <div className="mt-1 text-[11.5px] text-danger">{f.note}</div>}
+            <div className="mt-2 space-y-1">
+              {repoStates.map((st) => (
+                <div key={st.repo} className="flex flex-wrap items-center gap-2 font-mono text-[11.5px]">
+                  <span className="w-20 shrink-0 truncate text-text">{st.repo}</span>
+                  <span className={st.behind > 0 ? 'text-danger' : 'text-muted'}>↓{st.behind}</span>
+                  <span className={st.ahead > 0 ? 'text-accent' : 'text-muted'}>↑{st.ahead}</span>
+                  {st.dirty > 0 && <span className="text-warn">{st.dirty} 脏文件</span>}
+                  {st.rebasing && <span className="text-danger">rebase 进行中</span>}
+                  <button disabled={busy !== null} className="ml-auto rounded border border-border px-1.5 py-0.5 text-[10.5px] text-muted hover:bg-bg-hover disabled:opacity-40" onClick={() => commitRepo(f.id, st.repo)}>提交全部</button>
+                </div>
+              ))}
+            </div>
+            {diffs[f.id] && (
+              <div className="mt-2">
+                {diffs[f.id] === 'loading' ? (
+                  <div className="text-[11.5px] text-muted">diff 加载中…</div>
+                ) : (
+                  (diffs[f.id] as GitDiff).repos.map((d) => (
+                    <div key={d.repo} className="mb-1.5">
+                      {d.stat ? (
+                        <>
+                          <div className="font-mono text-[10.5px] text-muted">{d.repo} · {d.stat.split('\n').length} 文件</div>
+                          <pre className="max-h-64 overflow-auto rounded border border-border bg-bg p-2 font-mono text-[10.5px] leading-5">{d.patch}</pre>
+                        </>
+                      ) : (
+                        <div className="font-mono text-[10.5px] text-muted">{d.repo} · 无差异</div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        ))}
       </section>
 
       {/* 3.5 多仓变更管理：ChangeSet / 仿 fork */}
