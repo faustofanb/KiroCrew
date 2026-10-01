@@ -7273,6 +7273,19 @@ async def _wake_conductor_for_closed_worker(name: str) -> None:
     The import is function-local: ``conductor_wake`` reaches the work-ledger store, and
     every gateway runs this close path whether or not any conductor has ever opened a
     ledger.
+
+    WHEN IT IS CALLED. TRIGGER TWO of the crew-log wake, and only from the two exits
+    where the close is COMMITTED: after the archival save succeeds, and after the
+    hand-over exit's tail drain landed. Never between the pop and the save. The
+    conductor's probe answers "is this worker closed" by looking the slot up, and a
+    ``worker_closed`` answer persists a stall observation that no rollback retracts; a
+    tick fired in that window would read the popped slot as gone, and the save's
+    failure arm would then put the slot back under a permanent false "worker gone".
+
+    Awaited rather than detached: the binding read is offloaded inside and ``fire_now``
+    has no suspension point, so this adds one executor hop to a teardown that has
+    already awaited several -- and a detached task would outlive the close and could
+    fire after a same-key recreate.
     """
     try:
         from kiro_crew import conductor_wake
@@ -7517,18 +7530,6 @@ async def _close_slot(
             state.push_slots_update()
             raise
     state._slots.pop(name, None)
-    # TRIGGER TWO of the crew-log wake. The slot is GONE as of the line above, which is
-    # what makes this the right moment rather than a few lines earlier: the conductor's
-    # probe answers "is this worker closed" by looking the slot up, so firing while it
-    # was still registered would hand the gate the pre-close answer and waste the turn.
-    #
-    # Only a bound worker's close reaches a conductor, and that is decided by the binding
-    # rather than here (:mod:`kiro_crew.conductor_wake`). Awaited rather than detached:
-    # the binding read is offloaded inside and ``fire_now`` has no suspension point, so
-    # this adds one executor hop to a teardown that has already awaited several -- and a
-    # detached task would outlive the close and could fire after a same-key recreate.
-    # Never raises, so it cannot abort a close.
-    await _wake_conductor_for_closed_worker(name)
     # Release any blocking wait before cancelling the task: a question pending on
     # the blocking POST /api/ask-question path holds an MCP worker on an open
     # HTTP request, and the slot is going away, so nobody will answer its card.
@@ -7633,6 +7634,8 @@ async def _close_slot(
         # Otherwise return, do not raise: for the ORIGINAL the close is complete
         # (popped, task cancelled, tail durable), so every caller — the DELETE
         # handler and session-control's close_target — must read this as success.
+        # Committed, so the conductor may be told now and not before.
+        await _wake_conductor_for_closed_worker(name)
         return
     try:
         await save_slot_off_loop(state, slot, closed=True, closed_at=closed_at, best_effort=False)
@@ -7722,6 +7725,8 @@ async def _close_slot(
         # per-slot cards on it can never be pruning a slot that comes back.
         state.push_slot_removed(name)
         discard_closing_failure_scopes()
+        # Committed, so the conductor may be told now and not before.
+        await _wake_conductor_for_closed_worker(name)
     # The app was already told, and compensated if the persist above failed — see
     # the notify block before the pop and the rollback in the except branch.
     # Kill the per-tab session to free resources. Re-check identity ONE more

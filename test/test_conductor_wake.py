@@ -455,8 +455,8 @@ def test_worker_closed_reads_existence_not_liveness():
         def __init__(self, keys):
             self._keys = keys
 
-        def get_slot(self, key):
-            return object() if key in self._keys else None
+        def slot_exists(self, key):
+            return key in self._keys
 
     assert ledger_wake.worker_closed(_Table({WORKER}), WORKER) is False
     assert ledger_wake.worker_closed(_Table({f"dashboard_{WORKER}"}), WORKER) is False
@@ -464,3 +464,245 @@ def test_worker_closed_reads_existence_not_liveness():
     # An unreadable table cannot PROVE a close, so it reports none.
     assert ledger_wake.worker_closed(None, WORKER) is False
     assert ledger_wake.worker_closed(_Table(set()), "") is False
+
+
+def test_a_table_that_cannot_answer_existence_reports_no_close():
+    """``get_slot`` alone is an acquisition door, not an existence one.
+
+    It hides a slot still being built, so reading its ``None`` as "gone" is the defect
+    this function exists to avoid. A table offering only that door cannot prove a close.
+    """
+    from kiro_crew import ledger_wake
+
+    class _AcquireOnly:
+        def get_slot(self, _key):
+            return None
+
+    assert ledger_wake.worker_closed(_AcquireOnly(), WORKER) is False
+
+
+def test_a_reported_worker_under_construction_is_not_closed(tmp_path):
+    """A rehydrating or resuming worker is open, though ``get_slot`` hides it.
+
+    Driven against a REAL ``DashboardState``, because the hiding is that class's own
+    rule and a stub table would only pin this test against itself. Both shapes the
+    construction path takes are covered: the slot registered while marked, and the
+    slot retracted from ``_slots`` across the import tail with the mark still set.
+    The control is the same key with no mark and no slot, which must read as closed --
+    otherwise the two False answers would pass for a function that never says True.
+    """
+    from chat_test_helpers import _make_state
+
+    from kiro_crew import ledger_wake
+
+    item_id = _bind(status="progress")
+    state = _make_state(tmp_path)
+
+    state.get_or_create_slot(WORKER)
+    state._slots_under_construction.add(WORKER)
+    assert state.get_slot(WORKER) is None, "precondition: get_slot hides the slot"
+    closed = ledger_wake.worker_closed(state, WORKER)
+    assert closed is False
+    # And the gate, fed that answer, keeps the window for an item that already reported.
+    assert not work_ledger.is_stale(
+        _item(item_id), worker_running=False, worker_closed=closed, window_secs=3600
+    )
+
+    state._slots.pop(WORKER, None)
+    assert ledger_wake.worker_closed(state, WORKER) is False, "retracted but still building"
+
+    state._slots_under_construction.discard(WORKER)
+    assert ledger_wake.worker_closed(state, WORKER) is True, "control: really gone"
+
+
+# ── trigger two, ordering: only a committed close wakes ──────────────────────
+
+
+def _closing_state(tmp_path):
+    from chat_test_helpers import _make_state
+
+    state = _make_state(tmp_path)
+    slot = state.get_or_create_slot(WORKER)
+    slot.append("user", "do the item")
+    slot.append("assistant", "doing it")
+    slot.drain()
+    return state, slot
+
+
+def _record_close(monkeypatch, *, save_fails: bool) -> list[str]:
+    """Record the archival save and the wake in the order ``close_slot`` reaches them."""
+    from kiro_crew import autonudge
+    from kiro_crew.dashboard import chat_handlers
+
+    events: list[str] = []
+    monkeypatch.setattr(autonudge, "_INSTANCE", None)
+
+    async def _save(_state, _slot, *_a, **kw) -> None:
+        if kw.get("closed"):
+            events.append("save")
+            if save_fails:
+                raise OSError("disk full")
+
+    async def _wake(name: str) -> None:
+        events.append(f"wake:{name}")
+
+    monkeypatch.setattr(chat_handlers, "save_slot_off_loop", _save)
+    monkeypatch.setattr(chat_handlers, "_wake_conductor_for_closed_worker", _wake)
+    return events
+
+
+def test_a_close_whose_archival_fails_fires_no_wake(tmp_path, monkeypatch):
+    """The failure arm restores the slot, so the conductor must never have been told.
+
+    A tick fired before the save would read the popped slot as closed and persist a
+    ``worker_closed`` stall that the restore cannot retract.
+    """
+    from kiro_crew.dashboard import chat_handlers
+    from kiro_crew.dashboard.chat_handlers import SlotCloseError
+
+    events = _record_close(monkeypatch, save_fails=True)
+    state, slot = _closing_state(tmp_path)
+
+    async def _drive() -> None:
+        state.sessions.remove = _noop_remove  # type: ignore[assignment]
+        with pytest.raises(SlotCloseError):
+            await chat_handlers.close_slot(state, slot, WORKER)
+
+    asyncio.run(_drive())
+    assert events == ["save"], "the save was attempted and nothing woke"
+    assert state._slots.get(WORKER) is slot, "precondition: the failure arm restored it"
+
+
+def test_a_committed_close_fires_exactly_one_wake_after_the_save(tmp_path, monkeypatch):
+    from kiro_crew.dashboard import chat_handlers
+
+    events = _record_close(monkeypatch, save_fails=False)
+    state, slot = _closing_state(tmp_path)
+
+    async def _drive() -> None:
+        state.sessions.remove = _noop_remove  # type: ignore[assignment]
+        await chat_handlers.close_slot(state, slot, WORKER)
+
+    asyncio.run(_drive())
+    assert events == ["save", f"wake:{WORKER}"]
+    assert WORKER not in state._slots
+
+
+async def _noop_remove(_key) -> None:
+    return None
+
+
+# ── a push the service cannot take now is not lost ───────────────────────────
+
+
+def _service(base_dir, **kwargs):
+    from kiro_crew.autonudge import AutoNudgeService
+
+    return AutoNudgeService(base_dir=base_dir, **kwargs)
+
+
+def test_a_push_during_the_fire_window_re_arms_at_delay_zero_after_the_cycle(tmp_path, monkeypatch):
+    """The REAL service: ``fire_now`` refuses mid-fire, and the cycle's tail honours it.
+
+    The push lands from inside the delivery callback, which is exactly the window
+    ``_firing`` covers, and goes through the shared lookup every trigger uses. The tail
+    must then arm at delay ZERO -- a deadline arm would hold the worker's report for the
+    conductor's whole patrol cadence, since the cycle in flight read the ledger first.
+    """
+    import kiro_crew.autonudge as autonudge
+
+    monkeypatch.setenv("KIROCREW_AUTONUDGE", "1")
+    _bind(status="progress")
+    pushed: list[str] = []
+    arms: list[tuple[str, float | None]] = []
+
+    async def _drive() -> None:
+        svc = _service(tmp_path / "an")
+        monkeypatch.setattr(autonudge, "get_instance", lambda: svc)
+        loop = await svc.add(CONDUCTOR, "patrol the fleet", idle_secs=3600, watch="work-ledger")
+
+        async def _on_fire(_loop) -> bool:
+            assert loop.id in svc._firing, "precondition: the push lands mid-fire"
+            pushed.append(await conductor_wake.fire_for_worker_slot(WORKER))
+            return True
+
+        async def _not_quiet(_loop) -> bool:
+            return False
+
+        def _spy_arm(armed, delay=None) -> None:
+            arms.append((armed.id, delay))
+
+        svc._on_fire = _on_fire
+        svc._monitor_tick_is_quiet = _not_quiet  # type: ignore[method-assign]
+        svc._arm_timer = _spy_arm  # type: ignore[method-assign]
+        try:
+            await svc._timer(loop, delay=0.0)
+        finally:
+            svc.stop()
+        assert arms and arms[-1] == (loop.id, 0.0)
+        assert loop.id not in svc._pulled_forward, "the claim is released where applied"
+
+    asyncio.run(_drive())
+    assert pushed == [""], "the push itself was refused, as the window requires"
+
+
+def _restored_service_ticks(tmp_path, monkeypatch, *, report_after: str) -> "tuple[str, list[str]]":
+    """Arm a work-ledger loop, tick it quiet, then restart and let ``start()`` run it.
+
+    Returns the loop's id and the loop ids the restarted service delivered a turn for. The first service
+    records the fingerprint of the ledger as it stood; *report_after* is a worker status
+    written while the gateway is "down", or ``""`` for no new event at all.
+    """
+    monkeypatch.setenv("KIROCREW_AUTONUDGE", "1")
+    item_id = _bind(status="progress")
+    base = tmp_path / "an"
+    fired: list[str] = []
+    arms: list[tuple[str, float | None]] = []
+
+    async def _first() -> str:
+        svc = _service(base)
+        loop = await svc.add(CONDUCTOR, "patrol the fleet", idle_secs=3600, watch="work-ledger")
+        try:
+            assert await svc._monitor_tick_is_quiet(loop) is True, "precondition: calm"
+            await svc._persist_locked()
+        finally:
+            svc.stop()
+        return loop.id
+
+    loop_id = asyncio.run(_first())
+    if report_after:
+        work_ledger.apply_worker_report(CONDUCTOR, item_id, status=report_after, summary="x")
+
+    async def _second() -> None:
+        async def _on_fire(loop) -> bool:
+            fired.append(loop.id)
+            return True
+
+        svc = _service(base, on_fire=_on_fire)
+        real_arm = svc._arm_timer
+
+        def _spy_arm(armed, delay=None) -> None:
+            arms.append((armed.id, delay))
+            real_arm(armed, delay)
+
+        svc._arm_timer = _spy_arm  # type: ignore[method-assign]
+        try:
+            await svc.start()
+            assert arms[:1] == [(loop_id, 0.0)], "start() arms a work-ledger loop at once"
+            await asyncio.wait_for(asyncio.shield(svc._timers[loop_id]), timeout=10)
+        finally:
+            svc.stop()
+
+    asyncio.run(_second())
+    return loop_id, fired
+
+
+def test_a_report_written_across_a_restart_wakes_once_at_boot(tmp_path, monkeypatch):
+    """The in-process push died with the process; the boot tick reads the ledger itself."""
+    loop_id, fired = _restored_service_ticks(tmp_path, monkeypatch, report_after="blocked")
+    assert fired == [loop_id]
+
+
+def test_a_restart_with_nothing_new_ticks_quiet_and_spends_no_turn(tmp_path, monkeypatch):
+    _loop_id, fired = _restored_service_ticks(tmp_path, monkeypatch, report_after="")
+    assert fired == []

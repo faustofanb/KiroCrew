@@ -189,28 +189,33 @@ def worker_closed(slot_table: Any, session_key: str) -> bool:
     ``is_stale`` makes the window apply to the first and not to the second.
 
     EXISTENCE, not liveness. A slot answering under either spelling means the session is
-    open, whatever it is doing.
+    open, whatever it is doing -- and that includes a slot still under construction,
+    which is why this asks ``slot_exists`` and not ``get_slot``. ``get_slot`` hides a
+    slot being built (so nobody acquires a half-finished session), and a worker that is
+    rehydrating or resuming would then read as closed; for a worker that already
+    reported, that skips the window and records a permanent stall for a live worker.
 
     Anything unreadable answers False, which is the direction that cannot invent a stall:
     a slot table this cannot interrogate leaves the staleness window measuring time, which
-    is what shipped. Note the asymmetry with :func:`worker_running`, whose safe direction
-    is also False -- there "unknown" must not SUPPRESS a wake, here it must not CAUSE one,
-    and False happens to be both.
+    is what shipped. A table with no ``slot_exists`` is unreadable in that sense: no other
+    accessor answers existence for a slot being built. Note the asymmetry with
+    :func:`worker_running`, whose safe direction is also False -- there "unknown" must not
+    SUPPRESS a wake, here it must not CAUSE one, and False happens to be both.
     """
     if slot_table is None or not session_key:
         return False
-    getter = getattr(slot_table, "get_slot", None)
-    if not callable(getter):
+    exists = getattr(slot_table, "slot_exists", None)
+    if not callable(exists):
         return False
     for candidate in (session_key, f"dashboard_{session_key}"):
         try:
-            slot = getter(candidate)
+            found = bool(exists(candidate))
         except Exception:
             # An unreadable table cannot prove a close, so report none rather than
             # continuing to the next spelling and reading its miss as evidence.
             logger.debug("wake gate: slot lookup failed for %s", candidate, exc_info=True)
             return False
-        if slot is not None:
+        if found:
             return False
     return True
 

@@ -244,7 +244,18 @@ class WorkLedgerProbe(irq.Probe):
         item: work_ledger.WorkItem,
         events: list[work_ledger.WorkEvent],
     ) -> list[irq.Observation]:
-        """Everything about one open item that needs the conductor."""
+        """Everything about one open item that needs the conductor.
+
+        Every observation here is ``IMMEDIATE``, not ``WAKE``. A ``WAKE`` waits out the
+        kernel's coalescing floor (``irq.DEFAULT_COALESCE_SECS``) on every entry, and
+        the tick that finds it still young answers quiet and re-arms at the loop's own
+        cadence -- so a ``question`` would reach the conductor one full cadence late,
+        however fast the crew-log push pulled the tick forward. The floor exists for a
+        subject whose sub-observations may not exist yet; a report is complete the
+        moment it is written, and a stall is a decision already made, so waiting
+        observes nothing further. ``IMMEDIATE`` skips the delay and keeps the mask,
+        and these keys never recur anyway.
+        """
         found: list[irq.Observation] = []
         for event in events:
             if not ledger_wake.is_actionable_event(event.kind, event.status):
@@ -258,7 +269,7 @@ class WorkLedgerProbe(irq.Probe):
             found.append(
                 irq.Observation(
                     f"{_REPORT_KEY}:{event.id}",
-                    irq.Severity.WAKE,
+                    irq.Severity.IMMEDIATE,
                     ledger_wake.wake_brief(
                         item_id=item.item_id,
                         status=event.status or "",
@@ -282,7 +293,7 @@ class WorkLedgerProbe(irq.Probe):
                 found.append(
                     irq.Observation(
                         f"{_STALL_KEY}:{item.item_id}:{item.last_report_at or 'none'}",
-                        irq.Severity.WAKE,
+                        irq.Severity.IMMEDIATE,
                         ledger_wake.stall_brief(
                             item_id=item.item_id,
                             status=item.status,

@@ -554,7 +554,9 @@ def test_each_waking_status_produces_one_observation():
         tick = _observe(_probe(), _ctx())
         mine = [o for o in tick.observations if item in o.brief]
         assert len(mine) == 1, status
-        assert mine[0].severity is irq.Severity.WAKE
+        # IMMEDIATE: a report is complete when written, so the coalescing floor would
+        # only hold it back -- and the tick that found it young re-arms at the cadence.
+        assert mine[0].severity is irq.Severity.IMMEDIATE
         assert f"status={status}" in mine[0].brief
         # Keyed on a content-addressed event id, so the key cannot recur and must
         # NOT be cleared when some other item reports.

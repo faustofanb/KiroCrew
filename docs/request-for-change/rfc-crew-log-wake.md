@@ -135,8 +135,12 @@ no binding to a conductor; the work ledger is the reporting channel, and Phase
 ### 3.2 Trigger two: a worker session closes
 
 `chat_handlers.close_slot` is the one path a dashboard session is closed
-through. After the slot is gone, the same lookup runs: binding, conductor slot,
-armed loop, `fire_now`.
+through. Once the close is COMMITTED, the same lookup runs: binding, conductor
+slot, armed loop, `fire_now`. Committed means after the archival save succeeded,
+or after the hand-over exit's tail drain landed -- never between the slot's pop
+and that save. A tick fired in that window would read the popped slot as closed
+and persist a `worker_closed` stall, and the save's failure arm puts the slot
+back without being able to retract that observation.
 
 Phase 3's liveness rule is a conjunction: quiet past the window, AND the worker
 not running, AND the next move still the worker's. "Not running" is true of an
@@ -160,6 +164,12 @@ that table does not carry. The two are indistinguishable from the absence alone,
 and this design makes ticks land in exactly those moments far more often -- it
 arms every work-ledger loop at delay zero on boot, and pulls a tick forward on any
 sibling worker's write.
+
+Existence is read through `DashboardState.slot_exists`, not `get_slot`.
+`get_slot` hides a slot still under construction so nobody acquires a
+half-finished session, and the import path retracts its slot from the table
+across its async tail while keeping the construction mark. Both are an open
+session, so a worker that is rehydrating or resuming never reads as closed.
 
 So the window is skipped only for an item that has REPORTED at least once
 (`last_report_at` set). A report proves the first cause: the worker was there, it
@@ -252,6 +262,20 @@ same fingerprint move. The 2026-09-22 draft's `delivered` map, replay sweep and
 one-shot scheduler deadline were there to make push the only path; with the
 tick kept, they are not needed and are not built.
 
+So the three ways a push can miss are not equal, and only one of them falls
+back to the tick:
+
+| how the push misses | what catches it |
+|---|---|
+| dropped (eager queue under pressure, binding unreadable) | the slow tick, one cadence later |
+| refused mid-fire | not lost: `defer_if_firing` arms the tail of that cycle at delay zero (§3.2c) |
+| in flight across a restart | not lost: `start()` ticks every work-ledger loop once at delay zero (§3.2c) |
+
+Both "not lost" rows are pinned against the real service: a push landing inside
+the fire window leaves the loop re-armed at delay zero once the cycle ends, and a
+loop restored with a stale fingerprint wakes once when the ledger moved while the
+gateway was down and stays quiet, spending no turn, when it did not.
+
 What changes for the conductor is only how long it waits for the fallback, so
 the `goal-conductor` skill can lengthen the patrol cadence once this lands:
 the tick is for silence, and silence is measured in hours.
@@ -265,6 +289,14 @@ event in that one tick; this is the coalescing the draft asked for, obtained
 from the existing timer rather than from a queue of envelopes. A `fire_now`
 that arrives while the loop is in `_run_fire_cycle` is refused, and the
 re-arm at the end of that cycle covers the report that caused it.
+
+The kernel's own coalescing window is NOT applied to these observations. A
+`WAKE` waits out `irq.DEFAULT_COALESCE_SECS` (240 s) per entry, and the tick that
+finds it still young answers quiet and re-arms at the loop's cadence -- so a
+pulled-forward tick would find the `question` and then hold it a whole cadence.
+That floor exists for a subject whose sub-observations may not exist yet; a
+report is complete when written and a stall is already decided, so the probe
+emits both as `IMMEDIATE`, which skips the delay and keeps the dedupe mask.
 
 ## 4. Cost
 
