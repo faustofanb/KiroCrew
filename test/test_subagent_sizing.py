@@ -908,6 +908,250 @@ class TestSampleLiveCosts:
 
 
 # ---------------------------------------------------------------------------
+# Settled-runtime cost sample: the auto cap is sized from the agent's OWN
+# runtime (kiro-cli + MCP servers), not the whole-subtree peak.
+# ---------------------------------------------------------------------------
+
+
+class TestSettledRuntimeCost:
+    """The learned ``mem_gb`` is a settled-runtime reading, not the peak.
+
+    ``_host_mem_term`` divides available memory by ``read_learned_cost("mem_gb")``
+    (the max per-bucket p90 of the recorded ``mem_gb``). The whole
+    process-subtree peak follows the tree up into every test suite and build a
+    run launches, so a single heavy run's peak — a 132.3 GB subtree on a host
+    with 93 GB free — as the divisor holds the cap at the floor of 3. The
+    recorded figure is instead the first CLEAN subtree reading taken once the run
+    has left startup with no tool in flight (its own runtime is up, no workload
+    yet) — the agent's own footprint.
+    """
+
+    def _agent(self, **kw):
+        from kiro_crew.subagent import SubagentInfo
+
+        info = SubagentInfo(id=kw.pop("id", "a1"), task="t", agent="kirocrew")
+        info._pid = 4242
+        for k, v in kw.items():
+            setattr(info, k, v)
+        return info
+
+    @staticmethod
+    def _sample(rss_kb: int = -1, jiffies: int = 0):
+        from kiro_crew.platform_compat import SubtreeSample
+
+        return SubtreeSample(rss_kb, jiffies, None, None)
+
+    def test_settled_capture_holds_the_first_clean_post_startup_reading(self, monkeypatch) -> None:
+        """The settled reading is captured once, after startup with no tool in
+        flight, and then held — it must not climb to a later build/test peak the
+        way ``peak_rss_gb`` does."""
+        import kiro_crew.subagent as sub
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        # Left startup, no tool in flight: a sample counts as settled.
+        info = self._agent(_first_stream_started=1.0)
+        m._agents = {"a1": info}
+        # 0.5 GB own runtime, then 132.3 GB once it launches a test/build subtree.
+        rss_seq = iter([int(0.5 * 1024 * 1024), int(132.3 * 1024 * 1024)])
+        monkeypatch.setattr(
+            sub, "_proc_subtree_sample", lambda pid, **kw: self._sample(rss_kb=next(rss_seq))
+        )
+        m._sample_live_costs()
+        m._sample_live_costs()
+
+        # Peak climbs to the whole-tree workload (task-manager surface only)...
+        assert info.peak_rss_gb == pytest.approx(132.3, abs=0.1)
+        # ...but the settled figure stays the agent's own runtime.
+        assert info.settled_rss_gb == pytest.approx(0.5, abs=0.01)
+        assert info._settled_rss_generation == info._rss_generation
+
+    def test_settled_not_captured_while_still_in_startup(self, monkeypatch) -> None:
+        """A run whose own session has not answered yet (_first_stream_started
+        None) records no settled reading — the sample would be startup noise."""
+        import kiro_crew.subagent as sub
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        info = self._agent()  # _first_stream_started is None → still in startup
+        m._agents = {"a1": info}
+        monkeypatch.setattr(
+            sub,
+            "_proc_subtree_sample",
+            lambda pid, **kw: self._sample(rss_kb=int(0.5 * 1024 * 1024)),
+        )
+        m._sample_live_costs()
+        assert info.settled_rss_gb == 0.0
+        assert info.peak_rss_gb == pytest.approx(0.5, abs=0.01)
+
+    def test_settled_not_captured_while_a_tool_is_in_flight(self, monkeypatch) -> None:
+        """A sweep landing while a tool runs reads the workload's subtree, so it
+        must NOT be recorded as the agent's runtime; the first CLEAN sweep is."""
+        import kiro_crew.subagent as sub
+        from kiro_crew.acp.liveness import ToolCallState
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        info = self._agent(_first_stream_started=1.0)
+        # A build is running when the first post-startup sweep lands.
+        info._inflight_tool = ToolCallState(
+            title="bash", command="pytest", dispatch_ts=0.0, dispatch_boot_ts=0.0
+        )
+        m._agents = {"a1": info}
+        # First sweep (tool in flight) reads 132.3 GB; second (tool cleared) 0.5.
+        rss_seq = iter([int(132.3 * 1024 * 1024), int(0.5 * 1024 * 1024)])
+        monkeypatch.setattr(
+            sub, "_proc_subtree_sample", lambda pid, **kw: self._sample(rss_kb=next(rss_seq))
+        )
+        m._sample_live_costs()
+        assert info.settled_rss_gb == 0.0  # workload sweep skipped
+        info._inflight_tool = None
+        m._sample_live_costs()
+        assert info.settled_rss_gb == pytest.approx(0.5, abs=0.01)  # clean sweep taken
+
+    @pytest.mark.asyncio
+    async def test_respawn_preserves_the_settled_sample_until_a_replacement(
+        self, monkeypatch
+    ) -> None:
+        """The real cancel-recovery respawn keeps the dead process's settled
+        reading and re-arms capture via the generation bump.
+
+        Drives ``_schedule_cancel_recovery`` end to end (``_run`` stubbed so no
+        child spawns) rather than bumping ``_rss_generation`` by hand, so the
+        actual respawn block in ``cancellation.py`` is what is exercised: it must
+        advance the generation, reset the per-process reading counters, and leave
+        ``settled_rss_gb`` standing. A later clean sweep then replaces it."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from test_subagent_reap_race import _info, _make_manager, _noop_reset
+
+        import kiro_crew.subagent as sub
+
+        mgr = _make_manager()
+        mgr._sessions.reset = _noop_reset
+        info = _info(
+            _session_sharing=False,
+            started=time.time() - 5.0,
+            _pid=4242,
+            _first_stream_started=1.0,
+            settled_rss_gb=0.5,
+            _settled_rss_generation=0,
+            peak_rss_gb=132.3,
+            last_rss_gb=132.3,
+            _rss_samples=7,
+        )
+        mgr._agents[info.id] = info
+        mgr._running_count = 1
+        gen_before = info._rss_generation
+        # Stub the respawn's _run so recovery completes without a real child.
+        mgr._run = AsyncMock()
+
+        async def _arm() -> None:
+            mgr._schedule_cancel_recovery(info)
+
+        await asyncio.create_task(_arm())
+        recovery = mgr._tasks.get(f"{info.id}:recovery")
+        assert recovery is not None, "recovery task was not registered"
+        await asyncio.wait_for(recovery, timeout=5)
+
+        # The real respawn advanced the generation and reset per-process counters,
+        # but the dead process's settled reading stands (not reverted to peak).
+        assert info._rss_generation == gen_before + 1
+        assert info._rss_samples == 0
+        assert info.last_rss_gb == 0.0
+        assert info.settled_rss_gb == pytest.approx(0.5, abs=0.01)
+        assert info._settled_rss_generation == gen_before  # trails → re-armed
+
+        # The fresh process's first clean sweep replaces it (0.6 GB own runtime).
+        assert not info.done and info._pid, "respawned run must be live for a sweep"
+        mgr._agents = {info.id: info}
+        monkeypatch.setattr(
+            sub,
+            "_proc_subtree_sample",
+            lambda pid, **kw: self._sample(rss_kb=int(0.6 * 1024 * 1024)),
+        )
+        mgr._sample_live_costs()
+        assert info.settled_rss_gb == pytest.approx(0.6, abs=0.01)
+        assert info._settled_rss_generation == info._rss_generation
+
+    def test_record_cost_writes_settled_not_peak(self, monkeypatch) -> None:
+        """A 132.3 GB whole-tree peak with a 0.5 GB settled runtime records 0.5 GB
+        as ``mem_gb`` — the divisor the auto cap is sized from."""
+        import kiro_crew.subagent as sub
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        info = self._agent(peak_rss_gb=132.3, settled_rss_gb=0.5, peak_cpu_cores=4.0)
+        captured: dict = {}
+        monkeypatch.setattr(
+            sub,
+            "append_cost_sample",
+            lambda agent, mem_gb, cpu_cores, shared=False: captured.update(
+                agent=agent, mem_gb=mem_gb, cpu_cores=cpu_cores, shared=shared
+            ),
+        )
+        m._record_cost(info)
+        assert captured["mem_gb"] == pytest.approx(0.5, abs=0.01)
+        # CPU is telemetry only and keeps its whole-run peak.
+        assert captured["cpu_cores"] == pytest.approx(4.0, abs=0.01)
+
+    def test_record_cost_falls_back_to_peak_when_never_settled(self, monkeypatch) -> None:
+        """A run that finished before any clean post-startup sweep (settled == 0)
+        records its peak — a short run whose peak is its own runtime anyway."""
+        import kiro_crew.subagent as sub
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        info = self._agent(peak_rss_gb=0.42, settled_rss_gb=0.0)
+        captured: dict = {}
+        monkeypatch.setattr(
+            sub,
+            "append_cost_sample",
+            lambda agent, mem_gb, cpu_cores, shared=False: captured.update(mem_gb=mem_gb),
+        )
+        m._record_cost(info)
+        assert captured["mem_gb"] == pytest.approx(0.42, abs=0.01)
+
+    def test_settled_runtime_cost_does_not_floor_the_cap(
+        self, patch_host, monkeypatch, tmp_path
+    ) -> None:
+        """End-to-end through the REAL cost store: a run whose whole-tree peak is
+        132.3 GB but whose settled runtime is 0.5 GB records 0.5 GB, and the cap
+        reads that recorded figure (not the peak) and sizes up.
+
+        No lookup is mocked — ``_record_cost`` appends to a real temp
+        ``cost_samples.jsonl`` and ``compute_max_subagents`` reads it back
+        through ``read_learned_cost``, so the test exercises the
+        recording→lookup→sizing path the fix changes rather than re-checking
+        ``_host_mem_term`` arithmetic against an injected number.
+
+        On a 93 GB host (buffer 20% → 74.4 GB usable, pool_size 0): with the
+        recorded 0.5 GB, ``floor(74.4 / 0.5) = 148`` → clamped to hard_cap 32;
+        had the 132.3 GB peak been recorded, ``floor(74.4 / 132.3) = 0`` →
+        clamped to the floor of 3. The recorded 0.5 GB is why the cap is 32.
+        """
+        from kiro_crew import subagent_cost
+
+        # Point the real cost store at a temp log; nothing is mocked past here.
+        store = tmp_path / "subagents"
+        monkeypatch.setattr(subagent_cost, "_cost_log_path", lambda: store / "cost_samples.jsonl")
+
+        m = _mgr(running=1, max_concurrent=32, last_ts=0.0)
+        # read_learned_cost needs >= _DEFAULT_MIN_SAMPLES (3) per agent to trust
+        # the learned value, so record three finished runs of the same agent,
+        # each with a 132.3 GB whole-tree peak and a 0.5 GB settled runtime.
+        for i in range(3):
+            info = self._agent(
+                id=f"a{i}", peak_rss_gb=132.3, settled_rss_gb=0.5, peak_cpu_cores=1.0
+            )
+            m._record_cost(info)
+        # The store now holds the settled figure, not the peak.
+        assert subagent_cost.read_learned_cost("mem_gb") == pytest.approx(0.5, abs=0.01)
+
+        patch_host(93.0, 48)
+        cfg = _cfg(buffer_pct=20, hard_cap=32, pool_size=0)
+        # Sized from the recorded 0.5 GB → 148 → clamped to hard_cap 32. Had the
+        # peak been recorded, floor(74.4/132.3)=0 would clamp to the floor of 3.
+        assert compute_max_subagents(cfg) == 32
+
+
+# ---------------------------------------------------------------------------
 # Container / cgroup hardening (Stage 8, dynamic-subagent-sizing.md §9)
 # ---------------------------------------------------------------------------
 

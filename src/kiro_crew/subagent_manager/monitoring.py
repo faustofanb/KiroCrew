@@ -805,6 +805,38 @@ class OrphanStallMonitor(ManagerComponent):
                 info._rss_samples += 1
                 if gb > info.peak_rss_gb:
                     info.peak_rss_gb = gb
+                # Settled-runtime cost (dynamic-subagent-sizing.md §4.1): the
+                # first CLEAN subtree reading taken once the run has left startup
+                # (``_first_stream_started`` set — its own session has answered)
+                # AND no tool is in flight, held until the next process replaces
+                # it. With no tool running the subtree is the agent's own runtime
+                # — kiro-cli plus the MCP servers running at that moment — so it
+                # approximates the per-agent cost the auto cap is sized from,
+                # rather than ``peak_rss_gb``, which follows the subtree up into
+                # whatever build or test subprocess a tool call spawns. It is a
+                # single whole-subtree reading at a quiet instant, not a
+                # per-process accounting: an MCP server that starts lazily after
+                # this sweep, or a detached ``setsid``/``nohup`` job the agent
+                # leaves running, is not in it, so the recorded cost can
+                # UNDERCOUNT — see dynamic-subagent-sizing.md §4.1 for the
+                # trade-off the per-spawn reserve covers. Keyed on the
+                # generation, not on ``<= 0.0``, so a respawn re-captures for the
+                # fresh process without discarding the dead one's valid reading
+                # in the window before the fresh process is sampled. A run in
+                # startup, or one with a tool in flight at every post-startup
+                # sweep, records nothing and ``_record_cost`` falls back to the
+                # peak. The guard and the tag use the LOCAL ``generation`` read
+                # before the off-loop sample (and proven current by the recheck
+                # above), never a fresh ``info._rss_generation``: a respawn after
+                # the recheck must not let this reading be stamped as the new
+                # process's.
+                if (
+                    info._settled_rss_generation != generation
+                    and info._first_stream_started is not None
+                    and info._inflight_tool is None
+                ):
+                    info.settled_rss_gb = gb
+                    info._settled_rss_generation = generation
             info.last_procs = _attributed_count(sample.procs, shared_n, info.last_procs)
             info.last_stubs = _attributed_count(sample.matched, shared_n, info.last_stubs)
             jiffies = sample.jiffies
@@ -819,13 +851,25 @@ class OrphanStallMonitor(ManagerComponent):
             info._cpu_sample_ts = now
 
     def _record_cost_impl(self, info: SubagentInfo) -> None:
-        """Persist this run's high-water RSS/CPU to the learned-cost store."""
-        if info.peak_rss_gb <= 0 and info.peak_cpu_cores <= 0:
+        """Persist this run's memory/CPU to the learned-cost store.
+
+        The recorded ``mem_gb`` is the SETTLED-runtime reading
+        (``settled_rss_gb``: the agent's own kiro-cli + MCP-server footprint,
+        sampled once after startup with no tool in flight), NOT the whole-subtree
+        ``peak_rss_gb``. The cap divides available memory by
+        ``read_learned_cost("mem_gb")``, so recording the peak would price a run's
+        build or test subtree as the agent's own cost and hold the cap at the
+        floor. The peak is the divisor only when a run finished before any clean
+        post-startup sweep took a settled reading — a short run whose peak is its
+        own runtime anyway. CPU is telemetry only and keeps its whole-run peak.
+        """
+        mem_gb = info.settled_rss_gb if info.settled_rss_gb > 0.0 else info.peak_rss_gb
+        if mem_gb <= 0 and info.peak_cpu_cores <= 0:
             return  # never sampled (e.g. finished before the first reaper sweep)
         try:
             append_cost_sample(
                 _cost_bucket(info.agent, info.execution_context),
-                info.peak_rss_gb,
+                mem_gb,
                 info.peak_cpu_cores,
                 shared=bool(info._session_sharing),
             )

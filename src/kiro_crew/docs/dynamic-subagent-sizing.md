@@ -83,11 +83,44 @@ cap      = clamp( mem_term, 3, hard_cap )
 Kiro Crew doesn't hard-code how much an agent costs — it measures it:
 
 - While an agent runs, the reaper loop periodically samples its process-tree
-  RSS (memory) and CPU, keeping the **high-water** mark for that run (a single
-  reading at exit would miss a mid-run peak that has already declined).
+  RSS (memory) and CPU. For CPU it keeps the **high-water** mark for the run
+  (telemetry only). For the memory figure that sizes the cap it takes a
+  **settled-runtime** reading instead: the first subtree RSS sample taken once
+  the runtime has left startup (its own session has answered) **and no tool is
+  in flight**, captured once and held. The no-tool-in-flight condition matters —
+  a sweep that lands while a `bash`/build/test tool call runs would read the
+  workload's subtree, not the runtime, so such a sweep is skipped and the first
+  genuinely quiet one is recorded. At that quiet instant the subtree is the
+  agent's own runtime — kiro-cli plus the MCP servers running then — so the
+  reading approximates the agent's own footprint rather than whatever workload a
+  tool later launches. The whole-run RSS high-water mark is still tracked, but
+  only for the live task-manager surface; it is deliberately **not** what the cap
+  is sized from, because a single run that launched a 132 GB test/build subtree
+  would otherwise price every slot at that peak and pin the cap at the floor of
+  3 ([#15298](https://github.com/kirodotdev/KiroCrew/issues/15298)).
+
+  **Trade-off — the settled reading can undercount.** It is one whole-subtree
+  snapshot at a quiet instant, not a per-process accounting of kiro-cli and each
+  MCP server. Anything not yet (or no longer) in the subtree at that instant is
+  invisible to it: an MCP server that starts lazily on first use **after** the
+  settled sweep, and any detached `setsid`/`nohup` background job the agent
+  leaves running outside the measured tree, are not counted. The learned cap is
+  therefore sized against the runtime's quiet footprint and prices **no** later
+  workload memory. What stands between that and host OOM is the **per-spawn
+  reserve** (`_startup_cost_gb` / `agent.subagent_cost_gb`), which is checked at
+  every spawn independently of the learned cap; the cap governs steady-state
+  concurrency, the per-spawn reserve guards the admission of each new run. This
+  change narrows the cost to the runtime on purpose — pricing the whole-subtree
+  peak as per-agent cost was the defect — and accepts the undercount as the cost
+  of not floor-pinning the cap.
 - At exit, one sample `{agent, mem_gb, cpu_cores, ts}` is appended to
-  `~/.kiro/crew/subagents/cost_samples.jsonl`. The CPU figure is telemetry
-  only; sizing reads `mem_gb`.
+  `~/.kiro/crew/subagents/cost_samples.jsonl`, where `mem_gb` is that
+  settled reading. The CPU figure is telemetry only; sizing reads `mem_gb`. A
+  run that finished before any clean post-startup sweep took a settled reading
+  records its peak instead — a short run whose peak is its own runtime anyway. A
+  cancel-recovery respawn keeps the dead process's settled reading (a valid
+  per-agent figure) until the fresh process captures its own clean one, rather
+  than reverting to the whole-subtree peak in the window before that lands.
 - At the next startup, Kiro Crew takes the **p90 of the last N memory samples
   per agent name** (robust to the occasional outlier run), then the worst case
   across agent types, as the divisor.

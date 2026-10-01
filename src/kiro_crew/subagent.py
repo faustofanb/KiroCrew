@@ -2453,14 +2453,45 @@ class SubagentInfo:
     # acquisition, which also restarts the clock.
     _gate_wait_started: float | None = None
     # Learned-cost high-water marks (dynamic-subagent-sizing.md §4.1), sampled
-    # periodically by the reaper loop and folded into the cost store at exit.
+    # periodically by the reaper loop. These describe the WHOLE process subtree,
+    # so once an agent launches a test suite or a build they climb to that
+    # workload's peak, not the agent's own runtime cost. They answer "how big
+    # did this run's tree get" for the live task-manager surface; the AUTO CAP
+    # is NOT sized from them (see ``settled_rss_gb``).
     peak_rss_gb: float = 0.0
     peak_cpu_cores: float = 0.0
-    # Most-recent sample of the same two signals. The peaks answer "how big can
-    # this agent get" (what sizing needs); a live task-manager surface needs "how
-    # big is it right now", which a high-water mark cannot express — it never
-    # comes back down. Both are written by the same sweep, so exposing the last
-    # sample costs no extra syscalls.
+    # The agent's own runtime memory (kiro-cli plus the MCP servers running at
+    # the time), approximated by a single whole-subtree reading taken once the
+    # runtime has left startup (``_first_stream_started`` set) with no tool in
+    # flight, and then held — a settled-runtime reading at a quiet instant,
+    # before a tool call grows the tree with a build/test subprocess. This is
+    # what the learned-cost store records and what sizes the auto cap
+    # (dynamic-subagent-sizing.md §4.1): the whole-subtree ``peak_rss_gb`` follows
+    # the tree up into every test suite and build a run launches, so a run with a
+    # heavy tool subtree would hold the cap at the floor if it were the divisor.
+    # It is a quiet-instant snapshot, NOT a per-process accounting: an MCP server
+    # that starts lazily after this sweep, or a detached ``setsid``/``nohup`` job
+    # the agent leaves running, is not counted, so the recorded cost can
+    # undercount a run's true footprint — the per-spawn reserve (``_startup_cost_gb``)
+    # is what covers that gap against OOM (see dynamic-subagent-sizing.md §4.1).
+    # 0.0 until the first clean post-startup sweep observes this run;
+    # ``_record_cost`` falls back to ``peak_rss_gb`` only when no such reading was
+    # taken. A cancel-recovery respawn KEEPS this reading (it is the dead
+    # process's own runtime, a valid figure) until the fresh process captures its
+    # own — see ``_settled_rss_generation``.
+    settled_rss_gb: float = 0.0
+    # The ``_rss_generation`` the held ``settled_rss_gb`` was captured under, or
+    # -1 when none has been. The sweep captures a fresh settled reading when this
+    # trails ``_rss_generation`` (a respawn bumped the latter), so the reading is
+    # re-taken per process WITHOUT discarding the prior one: the old value stands
+    # as the run's cost until a clean replacement lands, rather than reverting to
+    # the peak in the window before the fresh process is sampled.
+    _settled_rss_generation: int = -1
+    # Most-recent sample of the two high-water signals. The peaks answer "how big
+    # can this run's tree get"; a live task-manager surface needs "how big is it
+    # right now", which a high-water mark cannot express — it never comes back
+    # down. Both are written by the same sweep, so exposing the last sample costs
+    # no extra syscalls.
     last_rss_gb: float = 0.0
     last_cpu_cores: float = 0.0
     # Live process/MCP-stub counts of this run's subtree, from the same sweep.
