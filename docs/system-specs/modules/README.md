@@ -19,6 +19,7 @@ agent loads only the one it needs.
 | [harness-parity.md](harness-parity.md) | The invariants keeping the Kiro harness first-class while other harnesses are adapted, and the test pinning each. |
 | [harness-onboarding.md](harness-onboarding.md) | The sequence a new ACP harness walks to land: vocabulary, capability decisions, spawn path, handshake, install probe, selectability, and what a live harness additionally touches. |
 | [praxisd-acp.md](praxisd-acp.md) | The praxisd (PraxisCode Rust daemon) `acp` stdio subcommand: the wire contract, launch facts, acceptance sequence, and the staged route from stub to a real gated harness. |
+| [desktop-shell-adr.md](desktop-shell-adr.md) | Electron-vs-Tauri desktop shell decision: keep Electron for the backend-replacement phase, with named migration triggers (T1-T4) and a pre-surveyed capability map. |
 | [model-fallback.md](model-fallback.md) | The throttle-exhaustion model fallback (`agent.fallback_model`): trigger, shared walk, sticky restore, visibility — plus the single-message content-filter refusal fallback (`agent.refusal_fallback_model`). |
 | [session.md](session.md) | Sessions, slots, session keys, the warm pool, and PID tracking. |
 | [runtime-ownership.md](runtime-ownership.md) | Who owns an agent process: the lease and tenancy tables, the one kill gate, death classification, the kernel-versus-registry reconciler, and the pid-reader guards. |
