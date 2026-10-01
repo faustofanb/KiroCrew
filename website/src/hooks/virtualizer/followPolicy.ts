@@ -68,6 +68,10 @@ export interface FollowState {
   lastUserScrollAtRef: Ref<number>
   lastHardInputAtRef: Ref<number>
   lastUpwardInputAtRef: Ref<number>
+  /** Stamped on scrolling-key keydown only. Lets compensateAboveFold detect a
+   *  pending native key scroll and defer its reprice past it (Firefox discards
+   *  a pending key scroll if a programmatic scrollTop write lands first). */
+  lastKeyScrollAtRef: Ref<number>
   lastGrabInputAtRef: Ref<number>
   lastScrollEventAtRef: Ref<number>
   lastScrollClientHRef: Ref<number>
@@ -79,6 +83,10 @@ export interface FollowState {
   getFollow: () => boolean
   /** Hardware scroll intent (wheel / touch / scrollbar grab / scrolling key). */
   noteHardInput: (dir?: ScrollIntentDirection) => void
+  /** A scrolling-key keydown just fired on the scroller; stamps
+   *  lastKeyScrollAtRef so a concurrent above-fold reprice defers past the
+   *  browser's pending native key scroll instead of clobbering it. */
+  noteKeyScroll: () => void
 }
 
 export function useFollowState(followOutput: boolean): FollowState {
@@ -135,6 +143,13 @@ export function useFollowState(followOutput: boolean): FollowState {
   // during streaming, and a content-shrink clamp inside its settle window must
   // keep follow armed rather than releasing the reader who asked for the end.
   const lastUpwardInputAtRef = useRef<number>(Number.NEGATIVE_INFINITY)
+  // Stamped on scrolling-key keydown only (PageDown/arrows/space), by
+  // noteKeyScroll. compensateAboveFold reads it to detect a native key scroll
+  // the browser has queued but not yet committed: Firefox drops that pending
+  // key scroll if a programmatic scrollTop write lands first, so the reprice
+  // must defer past it. Separate from lastHardInputAtRef because wheel/touch/
+  // pointer commit synchronously and carry no such hazard.
+  const lastKeyScrollAtRef = useRef<number>(Number.NEGATIVE_INFINITY)
   // A pointer landing on the SCROLLBAR (the intent listener's `grab`): a scroll
   // is about to happen and nothing names its direction until the first drag
   // movement scrolls. Held like an upward input until that scroll event (see
@@ -203,6 +218,13 @@ export function useFollowState(followOutput: boolean): FollowState {
     // A scrollbar grab arms its own hold (see lastGrabInputAtRef); it is still
     // directionless for the clamp guard above.
     if (dir === 'grab') lastGrabInputAtRef.current = performance.now()
+  }, [])
+
+  // Stamp a pending native key scroll. Called from the scroller's keydown
+  // listener for scrolling keys only, so compensateAboveFold can defer its
+  // reprice write past the browser's not-yet-committed key step.
+  const noteKeyScroll = useCallback(() => {
+    lastKeyScrollAtRef.current = performance.now()
   }, [])
 
   // ---- The single chokepoint for programmatic scroll writes ----
@@ -310,6 +332,7 @@ export function useFollowState(followOutput: boolean): FollowState {
     lastUserScrollAtRef,
     lastHardInputAtRef,
     lastUpwardInputAtRef,
+    lastKeyScrollAtRef,
     lastGrabInputAtRef,
     lastScrollEventAtRef,
     lastScrollClientHRef,
@@ -320,6 +343,7 @@ export function useFollowState(followOutput: boolean): FollowState {
     writeScrollTop,
     getFollow,
     noteHardInput,
+    noteKeyScroll,
   }
 }
 

@@ -556,20 +556,25 @@ describe('useVirtualChat: observer registration ORDER', () => {
       'doc-listen:visibilitychange',
       'RO:new', 'RO:observe:row0', 'RO:observe:row1', 'RO:observe:row2', 'RO:observe:row3',
       'RO:observe:scroller',
-      // Second commit, once the scroller element is in state.
-      'listen:scroll', ...INTENT.map((t) => `listen:${t}`),
+      // Second commit, once the scroller element is in state. The scroll
+      // listener's intent listeners end with the direction keydown; the
+      // reprice-defer keydown (compensateAboveFold's pending-key guard,
+      // observers.ts) attaches right after them, so a second keydown follows.
+      'listen:scroll', ...INTENT.map((t) => `listen:${t}`), 'listen:keydown',
       'interval:500',
       'RO:observe:scroller',
       'IO:new:200px 0px', 'IO:new:200px 0px', 'IO:observe:sentinel-top', 'IO:observe:sentinel-bottom',
     ])
     expect(resubscribe).toEqual([
       'doc-unlisten:visibilitychange',
-      'unlisten:scroll', ...INTENT.map((t) => `unlisten:${t}`),
+      // Teardown removes the scroll listener, then the reprice-defer keydown,
+      // then the intent listeners (which end with their own keydown).
+      'unlisten:scroll', 'unlisten:keydown', ...INTENT.map((t) => `unlisten:${t}`),
       'clearInterval',
       'RO:disconnect',
       'IO:disconnect', 'IO:disconnect',
       'doc-listen:visibilitychange',
-      'listen:scroll', ...INTENT.map((t) => `listen:${t}`),
+      'listen:scroll', ...INTENT.map((t) => `listen:${t}`), 'listen:keydown',
       'interval:500',
       'RO:new', 'RO:observe:row0', 'RO:observe:row1', 'RO:observe:row2', 'RO:observe:row3',
       'RO:observe:scroller',
@@ -578,7 +583,7 @@ describe('useVirtualChat: observer registration ORDER', () => {
     expect(teardown).toEqual([
       'RO:unobserve:row0', 'RO:unobserve:row1', 'RO:unobserve:row2', 'RO:unobserve:row3',
       'doc-unlisten:visibilitychange',
-      'unlisten:scroll', ...INTENT.map((t) => `unlisten:${t}`),
+      'unlisten:scroll', 'unlisten:keydown', ...INTENT.map((t) => `unlisten:${t}`),
       'clearInterval',
       'RO:disconnect',
       // The late-scroller effect's unobserve finds the observer already torn

@@ -11,7 +11,7 @@
 // IntersectionObservers are the window's own edge triggers (windowRange.ts).
 
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type RefObject } from 'react'
-import { attachUserScrollIntent } from '../../utils/searchScroll'
+import { attachUserScrollIntent, isScrollingKey } from '../../utils/searchScroll'
 import { computeAtBottom, isSelfScroll } from './FollowController'
 import { noteUserScrollActivity } from '../../lib/scrollQuiet'
 import { devWatchScroller } from '../../dev/scrollInspector'
@@ -132,14 +132,14 @@ export function useScrollListener<T>(ctx: {
   setIsAtBottom: (update: (prev: boolean) => boolean) => void
   itemsRef: Ref<T[]>
   getKeyRef: Ref<(item: T, index: number) => string>
-  follow: Pick<FollowState, 'smoothPinActiveRef' | 'lastWriteTopRef' | 'lastObservedTopRef' | 'noteHardInput'>
+  follow: Pick<FollowState, 'smoothPinActiveRef' | 'lastWriteTopRef' | 'lastObservedTopRef' | 'noteHardInput' | 'noteKeyScroll'>
   pinning: Pick<Pinning, 'onFollowScroll' | 'cancelHeldPinRetry'>
   reading: Pick<ReadingPositionEntry<T>, 'lastScrollCtxRef' | 'sessionIdRef' | 'scheduleAnchorSave'>
   measurement: Pick<RowMeasurement, 'noteRowTops'>
   ops: Pick<WindowOperations, 'recomputeWindow'>
 }): void {
   const { scrollerEl, bottomThreshold, setIsAtBottom, itemsRef, getKeyRef } = ctx
-  const { smoothPinActiveRef, lastWriteTopRef, lastObservedTopRef, noteHardInput } = ctx.follow
+  const { smoothPinActiveRef, lastWriteTopRef, lastObservedTopRef, noteHardInput, noteKeyScroll } = ctx.follow
   const { onFollowScroll, cancelHeldPinRetry } = ctx.pinning
   const { lastScrollCtxRef, sessionIdRef, scheduleAnchorSave } = ctx.reading
   const { noteRowTops } = ctx.measurement
@@ -205,9 +205,20 @@ export function useScrollListener<T>(ctx: {
     // harmless when the input does not scroll (a click, a wheel at the bottom):
     // follow resumes SCROLL_SETTLE_MS later.
     const detachIntent = attachUserScrollIntent(el, noteHardInput)
+    // Stamp a PENDING native key scroll on scrolling-key keydown. The intent
+    // listener above also sees keys, but it bumps the direction-blind hard-input
+    // settle stamp, which wheel/touch/pointer share — and only KEY scrolls carry
+    // the Firefox hazard where a programmatic scrollTop write between keydown and
+    // the committed step discards the pending scroll. compensateAboveFold reads
+    // this dedicated stamp to defer its reprice past the pending key step.
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isScrollingKey(e.key)) noteKeyScroll()
+    }
+    el.addEventListener('keydown', onKeyDown)
     onScroll()
     return () => {
       el.removeEventListener('scroll', onScroll)
+      el.removeEventListener('keydown', onKeyDown)
       detachIntent()
       // The intent stamps a held pin retry waits on come from `detachIntent`'s
       // listeners; with those gone the retry has nothing to wait for and must
@@ -221,7 +232,7 @@ export function useScrollListener<T>(ctx: {
       scrollRafScheduledRef.current = false
     }
   }, [
-    scrollerEl, bottomThreshold, onFollowScroll, cancelHeldPinRetry, noteHardInput, recomputeWindow, scheduleAnchorSave, noteRowTops,
+    scrollerEl, bottomThreshold, onFollowScroll, cancelHeldPinRetry, noteHardInput, noteKeyScroll, recomputeWindow, scheduleAnchorSave, noteRowTops,
     smoothPinActiveRef, lastWriteTopRef, lastObservedTopRef, lastScrollCtxRef, sessionIdRef, itemsRef, getKeyRef,
     setIsAtBottom,
   ])
@@ -266,7 +277,11 @@ export function useResizeObserver(ctx: {
       const batch = measureResizeEntries(entries, el)
       // A write here moves every row; the last seen positions move with it,
       // so a further callback of this same layout measures only what it adds.
-      if (compensateAboveFold(el, batch.aboveFoldReprice)) shiftRowTops(batch.aboveFoldReprice)
+      // compensateAboveFold owns the row-top accounting (shiftRowTops): it
+      // couples the record shift to the actual write, which may defer a frame
+      // past a pending native key scroll (Firefox), so the record must not be
+      // shifted here before the write is known to have landed.
+      compensateAboveFold(el, batch.aboveFoldReprice, shiftRowTops)
       if (deferForRailSettle(batch)) return
       followResizeBatch(batch)
       scheduleResizeSync(batch)

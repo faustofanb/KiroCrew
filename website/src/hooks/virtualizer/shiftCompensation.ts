@@ -15,7 +15,7 @@
 
 import { useCallback, useLayoutEffect, useRef, useState, type MutableRefObject, type RefObject } from 'react'
 import { captureAnchorCandsFrom, captureTopAnchorFrom, rowTopFrom } from './anchorGeometry'
-import { heightAnchorStillUsable, shiftCompensationAllowed } from './FollowController'
+import { heightAnchorStillUsable, keyScrollPending, shiftCompensationAllowed } from './FollowController'
 import { planHeightRetirement, type HeightIndex } from './HeightIndex'
 import type { WindowRange } from './WindowCalculator'
 import type { FollowState, Pinning } from './followPolicy'
@@ -796,7 +796,7 @@ export function useShiftCapture<T>(ctx: {
 export interface ShiftCompensation {
   /** The resize observer's same-fire correction for rows repriced above the
    *  fold. Returns whether it wrote. */
-  compensateAboveFold: (el: HTMLDivElement, aboveFoldReprice: number) => boolean
+  compensateAboveFold: (el: HTMLDivElement, aboveFoldReprice: number, shiftRowTops: (delta: number) => void) => void
 }
 
 /** The consuming half, all pre-paint layout effects. Called after the height
@@ -814,7 +814,7 @@ export function useShiftCompensation<T>(ctx: {
   anchorIdOf: (item: T, index: number) => string
   setWindowRange: SetWindowRange
   shift: ShiftCapture
-  follow: Pick<FollowState, 'stickRef' | 'writeScrollTop'>
+  follow: Pick<FollowState, 'stickRef' | 'writeScrollTop' | 'lastKeyScrollAtRef'>
   pinning: Pick<Pinning, 'prePaintRepin'>
   reading: Pick<ReadingPositionEntry, 'settleMeasuringRef'>
   ops: Pick<WindowOperations, 'recomputeWindow'>
@@ -826,7 +826,7 @@ export function useShiftCompensation<T>(ctx: {
     shiftAnchorRef, shiftStageRef, prependCountRef, shiftInsertedRef, prependPreScrollTopRef, prependNetRef,
     rebaseScheduledRef, heightAnchorPendingRef, spliceCommit, captureAnchorCands,
   } = ctx.shift
-  const { stickRef, writeScrollTop } = ctx.follow
+  const { stickRef, writeScrollTop, lastKeyScrollAtRef } = ctx.follow
   const { prePaintRepin } = ctx.pinning
   const { settleMeasuringRef } = ctx.reading
   const { recomputeWindow } = ctx.ops
@@ -835,7 +835,22 @@ export function useShiftCompensation<T>(ctx: {
    *  identity change there is the width-scope swap, not a reprice. */
   const heightOwnerSeenRef = useRef<HeightIndex>(offsetIndex)
 
-  const compensateAboveFold = useCallback((el: HTMLDivElement, aboveFoldReprice: number): boolean => {
+  // ---- Deferred above-fold reprice (Firefox pending-key-scroll guard) ----
+  // When a native key scroll is pending, compensateAboveFold cannot write
+  // scrollTop synchronously without Firefox dropping the pending key step, so
+  // it accumulates the relative delta here and lands it in a single rAF AFTER
+  // the browser commits the key step. Coalescing into one pending delta + one
+  // scheduled frame keeps repeated fires inside the window from stacking a
+  // write (and a double accounting) per fire.
+  const deferredRepriceRef = useRef(0)
+  const deferredRafRef = useRef(0)
+  const deferredForKeyAtRef = useRef(0)
+
+  const compensateAboveFold = useCallback((
+    el: HTMLDivElement,
+    aboveFoldReprice: number,
+    shiftRowTops: (delta: number) => void,
+  ): void => {
     // Hold a RELEASED reader against a reprice above them, in this fire. The
     // amount is the residual the measurement owner computed against the
     // reader's row's last seen position (see measureResizeEntries), so it is
@@ -852,11 +867,66 @@ export function useShiftCompensation<T>(ctx: {
     // effect): repricing rows above the fold shifts the reader to stay still,
     // which fights an absolute placement rather than preserving it.
     if (shiftCompensationAllowed({ stick: stickRef.current, settleMeasuring: settleMeasuringRef.current }) && Math.abs(aboveFoldReprice) > 0.5) {
+      // `aboveFoldReprice` is a RELATIVE delta — px of content that changed
+      // height ABOVE the viewport — so the write adds it to the live scrollTop
+      // to hold the reader's content position still. The write and the row-top
+      // accounting (shiftRowTops) are COUPLED: the record must move exactly
+      // when, and if, the write moves the rows. Doing the accounting without
+      // the write (or a frame early) corrupts the baseline a later fire of the
+      // same layout measures against, so compensateAboveFold owns both halves.
+      //
+      // Firefox discards a pending native key scroll (PageDown/arrows/space) if
+      // a programmatic absolute scrollTop write lands between the keydown and
+      // the browser committing the step. This fire runs in the ResizeObserver
+      // callback, which can fall in exactly that gap: writing here would cancel
+      // the pending key — the whole key scroll vanishes. So when a key scroll
+      // is pending, accumulate the delta and land it in a single rAF AFTER the
+      // browser commits the key step: the key's own scroll event re-reads every
+      // row top fresh (noteRowTops) in between, then the deferred frame writes
+      // the reprice on top of the post-key scrollTop and shifts the record by
+      // the same delta — preserving BOTH the key's movement and the correction.
+      if (keyScrollPending(performance.now(), lastKeyScrollAtRef.current)) {
+        deferredRepriceRef.current += aboveFoldReprice
+        // The key timestamp this deferral is waiting out. The rAF re-queues
+        // only if a STRICTLY NEWER key arrived meanwhile — the original key's
+        // step commits within a frame, so waiting on it alone would stall the
+        // correction for the whole backstop window.
+        deferredForKeyAtRef.current = lastKeyScrollAtRef.current
+        if (!deferredRafRef.current) {
+          const runDeferred = () => {
+            deferredRafRef.current = 0
+            // A frame later the reader may have grabbed the scroller or a
+            // restore may have taken the position; drop the correction.
+            if (!shiftCompensationAllowed({ stick: stickRef.current, settleMeasuring: settleMeasuringRef.current })) {
+              deferredRepriceRef.current = 0
+              return
+            }
+            // A NEWER scrolling key arrived inside the window (a held PageDown
+            // repeats every ~30ms): writing now would land in that newer key's
+            // gap and drop it too. Re-queue one more frame so the newer step
+            // commits first, and wait out THAT key. Bounded: with no fresh key
+            // the timestamp stops advancing and the next frame writes.
+            if (lastKeyScrollAtRef.current > deferredForKeyAtRef.current &&
+                keyScrollPending(performance.now(), lastKeyScrollAtRef.current)) {
+              deferredForKeyAtRef.current = lastKeyScrollAtRef.current
+              deferredRafRef.current = requestAnimationFrame(runDeferred)
+              return
+            }
+            const delta = deferredRepriceRef.current
+            deferredRepriceRef.current = 0
+            if (Math.abs(delta) <= 0.5) return
+            writeScrollTop(el, el.scrollTop + delta, 'auto', 'pin', 'abovefold')
+            // Accounting follows the actual write, in the same turn.
+            shiftRowTops(delta)
+          }
+          deferredRafRef.current = requestAnimationFrame(runDeferred)
+        }
+        return
+      }
       writeScrollTop(el, el.scrollTop + aboveFoldReprice, 'auto', 'pin', 'abovefold')
-      return true
+      shiftRowTops(aboveFoldReprice)
     }
-    return false
-  }, [writeScrollTop, stickRef, settleMeasuringRef])
+  }, [writeScrollTop, stickRef, settleMeasuringRef, lastKeyScrollAtRef])
 
   /**
    * Part 1 — TRIGGER 1 only: re-base the window by the anchored row's own

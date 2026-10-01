@@ -349,6 +349,30 @@ export function shiftCompensationAllowed(input: {
   return !input.stick && !input.settleMeasuring
 }
 
+/** Window (ms) after a scrolling-key keydown during which the browser's native
+ *  key scroll may still be PENDING (keydown fired, defaultPrevented=false, but
+ *  the scroll step not yet committed). One frame is enough on every engine;
+ *  ~100ms is a comfortable backstop for a busy main thread without lingering
+ *  long enough to defer an unrelated later reprice. */
+export const KEY_SCROLL_PENDING_MS = 100
+
+/**
+ * Did a native key scroll fire recently enough that its scroll step may not yet
+ * have been applied by the browser?
+ *
+ * Firefox discards a pending keyboard scroll (PageDown, arrows, space) if a
+ * programmatic absolute `scrollTop` write lands between the keydown and the
+ * browser committing the native step. `compensateAboveFold` writes in the
+ * ResizeObserver fire, which can fall in exactly that gap, so it must know when
+ * a key scroll is in flight and defer its reprice past the pending step rather
+ * than clobber it. Only KEY scrolls carry this hazard — wheel/touch/pointer
+ * commit synchronously — so this is stamped on scrolling-key keydown alone, not
+ * on the shared hard-input timestamp.
+ */
+export function keyScrollPending(now: number, lastKeyScrollAt: number): boolean {
+  return now - lastKeyScrollAt < KEY_SCROLL_PENDING_MS
+}
+
 /**
  * Is a height-sync anchor captured at `capturedScrollTop` still usable now that
  * the scroller reads `liveScrollTop`?

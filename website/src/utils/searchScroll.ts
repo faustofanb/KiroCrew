@@ -263,6 +263,16 @@ const SCROLLING_KEYS = new Set([
   'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar',
 ])
 
+/**
+ * Does this `KeyboardEvent.key` scroll a focused scroller natively? Exposes the
+ * key set above so a caller that must know a NATIVE key scroll is in flight
+ * (the scroller's own keydown stamp, which the reprice compensation reads) can
+ * ask the one authority rather than keep a second copy of the list that drifts.
+ */
+export function isScrollingKey(key: string): boolean {
+  return SCROLLING_KEYS.has(key)
+}
+
 // Direction of one scrolling key, for callers that need the input's own
 // direction. Comparisons against `KeyboardEvent.key` protocol values, never
 // rendered; horizontal arrows scroll neither way, and Space pages down.
