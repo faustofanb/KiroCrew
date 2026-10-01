@@ -841,3 +841,27 @@ corpus, one auth declaration, one install probe, one mirror class, and the three
 per-backend sites in `acp/client.py` that every harness has extended — the spawn arm,
 the spawn label and the stderr label. Those three are the only recurring edit points
 left that a membership set does not already absorb.
+
+## Worked example: the praxisd stub
+
+The first harness on boarded for a daemon that does not exist yet. praxisd (the
+PraxisCode Rust daemon) lands as a **development stub first**: a stdio ACP v1
+child answering `initialize` / `session/new` / `session/prompt` and nothing
+else, so the seam is proven end to end before the real binary grows a wire.
+
+| Stage | State |
+|---|---|
+| 1 vocabulary | Done — `ACP_BACKEND_PRAXISD`, in `ACP_BACKENDS_KNOWN`, `PROVIDER_LABEL_PRAXISD`, policy name mapped. |
+| 2 capability sets | Decided for every set, and every decision is OUT: the stub runs no tools, shares no process, mounts no MCP, owns no sessions and reports no models. In nothing until the daemon measures its way in. |
+| 3 spawn path | Done via `ACP_BACKEND_LAUNCH` (self-served): binary `praxisd`, args `acp`, override `PRAXISD_BIN`, protocol version 1. The install command names the stub in `scripts/dev/` rather than a package, because no package exists. |
+| 4 handshake | Done — `protocol_version=1` off the stub's own wire. |
+| 5 auth declaration | Done — keyless local child: no leaves on the floor, no overrides, not retired by a host logout, remedy names the stub instead of a sign-in. |
+| 6 install probe | Done — `_probe_self_served` reads the launch row; the row's install command is the honest "no package yet" answer. |
+| 7 selectability | Selectable, with a **no-channel** MCP projection: the stub accepts the session/new mcpServers array and mounts nothing. The channel that would have to exist is the session/new array; the decision is tracked at `docs/system-specs/modules/harness-onboarding.md#worked-example-the-praxisd-stub` (this section). |
+| routing | `UNVERIFIED`, named: the stub runs no tools, so there is nothing a gate would see. The real daemon must grow a `session/request_permission` per tool call before this row changes. |
+| residual | Everything the stub does not do. This row exists to prove the seam, not to serve sessions. |
+
+The lesson this example carries: **a harness can land as a stub without lying
+about itself.** Every declaration above says "development stub" where a real
+harness would cite a measurement, and the two honest absences — no routing, no
+channel — are the states the vocabulary keeps nameable for exactly this case.

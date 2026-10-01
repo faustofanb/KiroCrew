@@ -65,6 +65,7 @@ from kiro_crew.agent_sdk.backends import (
     ACP_BACKEND_CLAUDE,
     ACP_BACKEND_CODEX,
     ACP_BACKEND_DEEPSEEK,
+    ACP_BACKEND_PRAXISD,
     ACP_BACKEND_GOOSE,
     ACP_BACKEND_KAS,
     ACP_BACKEND_KIRO,
@@ -642,6 +643,28 @@ AGENT_AUTH_DECLARATIONS: Tuple[AgentAuthDeclaration, ...] = (
         # in. The phrase is pi-acp's own, not the SDK's generic prefix, so no other
         # harness's auth answer matches it.
         signed_out_signature="Configure an API key or log in with an OAuth provider",
+    ),
+    AgentAuthDeclaration(
+        backend=ACP_BACKEND_PRAXISD,
+        # The development stub authenticates nothing: no credential file, no
+        # provider key, no host store. Declared as own_credential_file with no
+        # leaves because that is the shape the onboarding doc gives a harness
+        # that needs no sign-in at all; the real praxisd speaks for itself when
+        # it lands and this entry is rewritten then.
+        credential_leaves=(),
+        home_override_env_vars=(),
+        adapter_own_leaves=(),
+        sign_in_remedy=(
+            "praxisd runs locally and needs no sign-in; if it is reported "
+            "missing, build the PraxisCode daemon or point PRAXISD_BIN at the "
+            "development stub in scripts/dev/."
+        ),
+        signed_out_message=(
+            "praxisd is a local daemon and does not sign in. Check that the "
+            "binary is reachable, then start a new chat."
+        ),
+        host_logout_retires_children=False,
+        entitlement_source=ENTITLEMENT_OWN_CREDENTIAL_FILE,
     ),
     AgentAuthDeclaration(
         backend=ACP_BACKEND_DEEPSEEK,

@@ -33,6 +33,7 @@ from kiro_crew.acp_backends import (
     ACP_BACKEND_CLAUDE,
     ACP_BACKEND_CODEX,
     ACP_BACKEND_DEEPSEEK,
+    ACP_BACKEND_PRAXISD,
     ACP_BACKEND_GOOSE,
     ACP_BACKEND_KAS,
     ACP_BACKEND_KIRO,
@@ -362,6 +363,20 @@ PROJECTIONS: dict[str, McpProjection] = {
             "the WHOLE session rather than being dropped"
         ),
         tracking="docs/request-for-change/rfc-agent-config-mirror.md#5-migration",
+    ),
+    ACP_BACKEND_PRAXISD: McpProjection(
+        kind=ProjectionKind.NO_CHANNEL,
+        reason=(
+            "praxisd is onboarding as a development stub: it accepts the "
+            "session/new mcpServers array and mounts nothing, so no Crew tool "
+            "reaches a session and the honest answer is that no channel carries "
+            "them yet. The real daemon decides native vs mirror when it grows an "
+            "MCP surface of its own."
+        ),
+        channel="the session/new mcpServers array, which the stub accepts but does not mount",
+        tracking=(
+            "docs/system-specs/modules/harness-onboarding.md#worked-example-the-praxisd-stub"
+        ),
     ),
 }
 

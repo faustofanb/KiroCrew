@@ -270,6 +270,16 @@ ACP_BACKEND_GOOSE = "goose"
 # closure -- so one global install is the whole precondition, with no workspace
 # checkout and no per-profile dependency step.
 ACP_BACKEND_DEEPSEEK = "deepseek"
+# praxisd: the local Rust daemon of the PraxisCode project, driven over ACP as a
+# per-session stdio child. Onboarding lands the DEVELOPMENT STUB first
+# (scripts/dev/praxisd_acp_stub.py answers initialize / session/new /
+# session/prompt and nothing else), so the install command names the stub rather
+# than a shipped binary. Routing stays UNVERIFIED until the real daemon emits
+# session/request_permission per tool call, and every capability membership is
+# deliberately OUT -- see the worked example at the end of
+# docs/system-specs/modules/harness-onboarding.md.
+ACP_BACKEND_PRAXISD = "praxisd"
+
 # The kiro-cli backend is spelled as the empty string throughout, so name it
 # rather than leaving every call site to infer it from "not claude".
 ACP_BACKEND_KIRO = ""
@@ -287,6 +297,7 @@ ACP_BACKENDS_KNOWN: FrozenSet[str] = frozenset(
         ACP_BACKEND_PI,
         ACP_BACKEND_GOOSE,
         ACP_BACKEND_DEEPSEEK,
+        ACP_BACKEND_PRAXISD,
     }
 )
 
@@ -514,6 +525,7 @@ BASELINE_SELECTABLE_BACKENDS: FrozenSet[str] = frozenset(
         ACP_BACKEND_PI,
         ACP_BACKEND_GOOSE,
         ACP_BACKEND_DEEPSEEK,
+        ACP_BACKEND_PRAXISD,
     }
 )
 
@@ -539,6 +551,7 @@ POLICY_ID_BY_BACKEND: dict = {
     ACP_BACKEND_PI: ACP_BACKEND_PI,
     ACP_BACKEND_GOOSE: ACP_BACKEND_GOOSE,
     ACP_BACKEND_DEEPSEEK: ACP_BACKEND_DEEPSEEK,
+    ACP_BACKEND_PRAXISD: ACP_BACKEND_PRAXISD,
 }
 
 #: The backend a deployment policy may never deny.
@@ -2363,6 +2376,10 @@ ACP_BACKEND_ROUTING: dict = {
     # extension Crew composes, which is this member, and the frame corpus carries the
     # live capture (``test/fixtures/acp_frames/deepseek/permission-request-live``).
     ACP_BACKEND_DEEPSEEK: Routing.VERIFIED_GATE_EXTENSION,
+    # The stub runs no tools and therefore asks nothing; UNVERIFIED is the honest
+    # answer and keeps praxisd outside ENFORCED_ROUTINGS until the daemon grows a
+    # gate that emits session/request_permission per call.
+    ACP_BACKEND_PRAXISD: Routing.UNVERIFIED,
 }
 
 
@@ -2558,6 +2575,21 @@ ACP_BACKEND_LAUNCH: Mapping[str, SelfServedLaunch] = {
         missing_hint=(
             "The ACP plugin package alone does not serve ACP: it is a plugin, and "
             "this binary is the host that boots the profile it lives in."
+        ),
+    ),
+    ACP_BACKEND_PRAXISD: SelfServedLaunch(
+        label="praxisd",
+        binary="praxisd",
+        acp_args=("acp",),
+        bin_env_var="PRAXISD_BIN",
+        install_command=(
+            "python3 scripts/dev/praxisd_acp_stub.py  # dev stub; the real binary "
+            "builds from the PraxisCode repository (rust/)"
+        ),
+        protocol_version=1,
+        missing_hint=(
+            "No adapter package exists: point PRAXISD_BIN at the development stub "
+            "in scripts/dev/ or at a built praxisd binary."
         ),
     ),
 }

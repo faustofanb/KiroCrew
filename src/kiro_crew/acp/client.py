@@ -234,9 +234,9 @@ from kiro_crew.agent import (
     require_unchanged_derived_spec,
 )
 from kiro_crew.agent_sdk import host_auth
-from kiro_crew.agent_sdk.backends import (
-    ACP_BACKEND_LAUNCH,
+from kiro_crew.agent_sdk.backends import (    ACP_BACKEND_LAUNCH,
     ACP_BACKEND_NODE_ADAPTER_PACKAGES,
+    ACP_BACKEND_PRAXISD,
     ACP_BACKEND_PROCESS_NAMES,
     NODE_ADAPTER_ENTRY_SEGMENTS,
     launch_for,
@@ -3841,6 +3841,10 @@ class AcpClient:
     @property
     def _is_deepseek(self) -> bool:
         return self.backend == ACP_BACKEND_DEEPSEEK
+
+    @property
+    def _is_praxisd(self) -> bool:
+        return self.backend == ACP_BACKEND_PRAXISD
 
     @property
     def _model_registry_namespace(self) -> str:
@@ -7719,6 +7723,17 @@ class AcpClient:
                     )
                 except acp_tool_gate.ToolGateUnroutable as exc:
                     raise AcpToolGateUnroutable(str(exc)) from None
+        elif self._is_praxisd:
+            # The PraxisCode daemon: a self-served binary whose whole launch is its
+            # ``ACP_BACKEND_LAUNCH`` row (binary + ``acp`` subcommand + ``PRAXISD_BIN``
+            # override), so the arm is the shared resolver and nothing more. No
+            # adapter entry script, no config seed, no MCP translation -- the stub
+            # mounts nothing and the daemon will grow its own extras when it grows a
+            # wire beyond the minimum (see the worked example in
+            # docs/system-specs/modules/harness-onboarding.md).
+            _praxisd_bin, argv, spawn_label, stderr_label = (
+                await self._resolve_self_served_launch()
+            )
         else:
             # Pin ONE reading of the environment for both the search and the
             # message that reports it. The previous code resolved against the live
