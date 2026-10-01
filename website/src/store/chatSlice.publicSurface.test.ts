@@ -91,6 +91,7 @@ const CONSTANTS: Record<string, unknown> = {
   REFRESH_LIMIT_CEILING: 500,
   SLOT_DETAIL_MAX_LIMIT: 500,
   TOOL_OUTPUT_MAX_CHARS: 64000,
+  WINDOW_WALK_MAX_PAGES: 8,
   WORKFLOW_TERMINAL_STATUSES: ['finished', 'failed', 'cancelled'],
 }
 

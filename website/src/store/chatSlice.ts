@@ -877,6 +877,7 @@ export {
 } from './chat/selectors'
 export { clearSwitchSlotGone, switchSlot, switchSlotNoticeCopy, type SwitchSlotArg } from './chat/slotSwitch'
 export { refreshSlot, warmSlotCache } from './chat/slotRefresh'
+export { WINDOW_WALK_MAX_PAGES } from './chat/windowWalk'
 export { createSlot, deleteHistorySession, fetchHistory, forkSlot, resumeFromHistory } from './chat/lifecycle'
 
 export default chatSlice.reducer
