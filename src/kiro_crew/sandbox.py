@@ -9595,9 +9595,30 @@ def main():
                 # and then mounting on the NAME would let the rename land in between.
                 target = ("/proc/self/fd/%d" % _mask_fd).encode()
             else:
+                # After the pin, an object that is a stand-in THIS launcher already
+                # bound means this name is a second spelling of a directory masked
+                # under its first (a symlinked home lists the data home under both
+                # the ``$HOME`` and the resolved spelling). Binding a fresh stand-in
+                # over it would move the name onto a stand-in the record for the first
+                # spelling does not name, and ``_covered_by_own_mask`` then reads a
+                # leaf absent beneath it as a vanished object and refuses the spawn.
+                # The mask is in place; record this spelling as reaching it and move
+                # on. Only a name without a vouched identity takes this arm, and a
+                # stand-in reached at such a name protects nothing more when masked
+                # again.
                 _mask_fd, target = _pin_mount_path(
                     d.encode(), stat.S_ISDIR, require_present=_mask_required(d))
                 if target is None:
+                    continue
+                _reached_st = os.fstat(_mask_fd)
+                _reached_id = (_reached_st.st_dev, _reached_st.st_ino)
+                if _reached_id in _OWN_STAND_INS:
+                    os.close(_mask_fd)
+                    # The name is read back exactly as every hiding mount's is: the
+                    # skip stands on the name reaching the stand-in NOW, not on the
+                    # descriptor having reached it a moment ago.
+                    _verify_masked_name(d.encode(), _reached_id, d)
+                    _MASKED_NAMES[d.rstrip("/")] = _reached_id
                     continue
             # Held open until the mount is done; every failure in between ends the
             # process, so the descriptor path stays valid for exactly the mount.

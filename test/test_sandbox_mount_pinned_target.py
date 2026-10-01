@@ -269,6 +269,9 @@ def _run(
     occupants: dict[str, list[int]] | None = None,
     globals_out: dict | None = None,
     private_dirs: tuple[str, ...] = (),
+    sensitive_dirs: list[str] | None = None,
+    sensitive_files: list[str] | None = None,
+    libc: _FakeLibc | None = None,
 ) -> tuple[_FakeLibc, _Bed, str | None]:
     """Run the extracted region. Returns ``(fake_libc, bed, refusal_or_None)``.
 
@@ -289,7 +292,7 @@ def _run(
     import ctypes
 
     bed = bed or _Bed(tmp_path)
-    libc = _FakeLibc()
+    libc = libc or _FakeLibc()
 
     def _no_op_verify(name, stand_in, what):  # noqa: ANN001, ANN202
         return None
@@ -315,7 +318,7 @@ def _run(
         "_src_prefix": "kirocrew_sb_%d_" % os.getpid(),
         "expose_data": {},
         "EXPOSE_FILES": [],
-        "SENSITIVE_DIRS": [str(bed.aws)],
+        "SENSITIVE_DIRS": [str(bed.aws)] if sensitive_dirs is None else list(sensitive_dirs),
         # Empty: these cases vouch for no mask-root or window identity, so the child
         # pins by name, which is the arm under test here.
         "SENSITIVE_DIR_IDS": {},
@@ -323,7 +326,9 @@ def _run(
         "PRIVATE_DIR_IDS": {},
         "READONLY_DIRS": [str(bed.cache)],
         "WRITABLE_DIRS": [],
-        "SENSITIVE_FILES": [str(bed.secret)],
+        "SENSITIVE_FILES": (
+            [str(bed.secret)] if sensitive_files is None else list(sensitive_files)
+        ),
         "REQUIRED_MASK_TARGETS": frozenset(required),
         # Empty by default: these tests are about which OBJECT a mount received, and
         # a hard-link alias entry here would refuse before the pinned-mount loop runs.
@@ -1213,6 +1218,84 @@ def test_a_leaf_absent_inside_a_bound_window_is_not_covered_by_the_mask_above(
 
 
 @_LINUX_LINK_PIN
+class _CoveringLibc(_FakeLibc):
+    """``_FakeLibc`` whose directory bind HIDES the target, as a real mount does.
+
+    The recording stand-in leaves the filesystem untouched, so a leaf under a
+    masked directory stays visible and the absent branches never run. Here a
+    fresh directory bind moves the target aside and renames the stand-in onto
+    its name -- same filesystem, so the name takes the stand-in's identity,
+    exactly what ``stat`` reports at a real mount point -- and everything that
+    was beneath the name is gone from every later look.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.covered: list[str] = []
+
+    def mount(self, source, target, fstype, flags, data):  # noqa: ANN001
+        super().mount(source, target, fstype, flags, data)
+        src, tgt = os.fsdecode(source), os.fsdecode(target)
+        for prefix in ("/proc/self/fd/",):
+            if src.startswith(prefix):
+                src = os.readlink(src)
+            if tgt.startswith(prefix):
+                tgt = os.readlink(tgt)
+        if flags & 4096 and not flags & 32 and os.path.abspath(src) != os.path.abspath(tgt):
+            os.rename(tgt, tgt + ".under-mask-%d" % len(self.covered))
+            os.rename(src, tgt)
+            self.covered.append(tgt)
+        return 0
+
+
+@_LINUX_LINK_PIN
+def test_a_data_home_listed_under_two_spellings_is_masked_once(tmp_path: Path) -> None:
+    """A symlinked home lists the data home twice; the second spelling must not re-mask it.
+
+    ``/home/u -> /mnt/home/u``: the probe hides the data home under its
+    ``$HOME`` spelling and under the resolved one, and the pass records the
+    crew hidden leaves under the resolved spelling only. Binding a second
+    stand-in over the already-masked directory moves the resolved name onto a
+    stand-in the record for it does not name; the file loop then finds the leaf
+    absent, ``_covered_by_own_mask`` sees the record and the filesystem disagree,
+    and the spawn is refused as a vanished object -- every probe on such a host,
+    so the model list and the account balance both come back empty. The second
+    spelling reaches a stand-in this launcher bound, so it is recorded as
+    masked and nothing is mounted; both names then reach the one stand-in, and
+    the leaf beneath them is covered.
+    """
+    real_home = tmp_path / "mnt" / "home" / "u"
+    crew = real_home / ".kirocrew"
+    leaf = crew / "diag"
+    leaf.mkdir(parents=True)
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / "u").symlink_to(real_home)
+    linked_crew = tmp_path / "home" / "u" / ".kirocrew"
+    seen = os.lstat(leaf)
+    bed = _Bed(tmp_path)
+    libc = _CoveringLibc()
+    region: dict = {}
+    # The builder's order: the leaf under both spellings, then the data home
+    # under the resolved spelling and under ``$HOME``. The file loop is offered
+    # every directory entry too.
+    dirs = [str(linked_crew / "diag"), str(leaf), str(crew), str(linked_crew)]
+    _, _, refusal = _run(
+        tmp_path,
+        bed=bed,
+        libc=libc,
+        globals_out=region,
+        occupants={str(leaf): [seen.st_dev, seen.st_ino, 0, 1, seen.st_dev, seen.st_ino]},
+        sensitive_dirs=dirs,
+        sensitive_files=[str(bed.secret), *dirs],
+    )
+    assert refusal is None, refusal
+    assert libc.covered.count(str(crew)) == 1, "the data home was masked more than once"
+    recorded = region["_MASKED_NAMES"]
+    assert recorded[str(crew)] == recorded[str(linked_crew)], "the two spellings disagree"
+    assert recorded[str(crew)] in region["_OWN_STAND_INS"]
+    assert not leaf.exists(), "the stand-in is not empty"
+
+
 def test_a_link_planted_at_the_name_and_aimed_at_a_stand_in_still_refuses(
     tmp_path: Path,
 ) -> None:
@@ -1626,6 +1709,16 @@ _BREAK_ARMS = (
         "                _mask_fd, target = _pin_mount_path(\n"
         "                    d.encode(), stat.S_ISDIR, require_present=_mask_required(d))\n"
         "                if target is None:\n"
+        "                    continue\n"
+        "                _reached_st = os.fstat(_mask_fd)\n"
+        "                _reached_id = (_reached_st.st_dev, _reached_st.st_ino)\n"
+        "                if _reached_id in _OWN_STAND_INS:\n"
+        "                    os.close(_mask_fd)\n"
+        "                    # The name is read back exactly as every hiding mount's is: the\n"
+        "                    # skip stands on the name reaching the stand-in NOW, not on the\n"
+        "                    # descriptor having reached it a moment ago.\n"
+        "                    _verify_masked_name(d.encode(), _reached_id, d)\n"
+        '                    _MASKED_NAMES[d.rstrip("/")] = _reached_id\n'
         "                    continue\n",
         "                _mask_fd, target = -1, d.encode()\n"
         "                if not os.path.isdir(target):\n"
