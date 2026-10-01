@@ -225,6 +225,58 @@ def checkout_branch(repo: str, root: str, name: str) -> dict:
     return {"repo": repo, "branch": name}
 
 
+def merge_branch(repo: str, root: str, source: str, target: str = "") -> dict:
+    """Merge ``source`` into ``target`` (or the current branch if empty)."""
+    rp = _resolve_repo(repo, root)
+    if target:
+        _ok(_git(["checkout", target], rp))
+    proc = _git(["merge", "--no-ff", source, "-m", f"merge {source}"], rp)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or "merge failed").strip()[:800])
+    return {"repo": repo, "merged": source, "into": target or "current"}
+
+
+def delete_branch(repo: str, root: str, name: str, force: bool = False) -> dict:
+    rp = _resolve_repo(repo, root)
+    flag = "-D" if force else "-d"
+    _ok(_git(["branch", flag, name], rp))
+    return {"repo": repo, "deleted": name}
+
+
+def discard_file(repo: str, root: str, path: str) -> dict:
+    """Discard unstaged changes in one file."""
+    rp = _resolve_repo(repo, root)
+    _ok(_git(["checkout", "--", path], rp))
+    return {"repo": repo, "path": path, "discarded": True}
+
+
+def stash(repo: str, root: str, message: str = "") -> dict:
+    rp = _resolve_repo(repo, root)
+    args = ["stash", "push"]
+    if message:
+        args += ["-m", message]
+    _ok(_git(args, rp))
+    return {"repo": repo, "stashed": True}
+
+
+def stash_list(repo: str, root: str) -> dict:
+    rp = _resolve_repo(repo, root)
+    out = _ok(_git(["stash", "list", "--format=%gd%x1f%s"], rp))
+    items = []
+    for line in out.strip().split("\n"):
+        if not line.strip():
+            continue
+        parts = line.split("\x1f")
+        items.append({"ref": parts[0], "message": parts[1] if len(parts) > 1 else ""})
+    return {"repo": repo, "stashes": items}
+
+
+def stash_pop(repo: str, root: str) -> dict:
+    rp = _resolve_repo(repo, root)
+    _ok(_git(["stash", "pop"], rp))
+    return {"repo": repo, "popped": True}
+
+
 # ── Blame ────────────────────────────────────────────────────────────────────
 
 def blame(repo: str, root: str, path: str) -> dict:

@@ -86,6 +86,16 @@ export default function GitGuiPage() {
       .catch((e) => setError(String(e)))
   }
 
+  const branchExtra = (op: string, extra: Record<string, unknown> = {}) => {
+    fetch(`${BASE}/branch-extra`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ repo, op, ...extra }),
+    })
+      .then((r) => (r.ok ? r.json() : r.json().then((b) => Promise.reject(new Error(b.error)))))
+      .then(() => { loadAll(); setError(null) })
+      .catch((e) => setError(String(e)))
+  }
+
   const showCommitDiff = (c: Commit) => {
     setSelectedCommit(c); setFileDiff(null); setBlameData(null)
     fetch(`${BASE}/diff/commit?repo=${encodeURIComponent(repo)}&sha=${c.sha}`)
@@ -128,15 +138,21 @@ export default function GitGuiPage() {
             <div className="border-t border-border px-3 py-2 text-[12px] font-semibold text-muted">分支</div>
             <div className="max-h-44 overflow-y-auto p-1.5">
               {branches.map((b) => (
-                <button
-                  key={b.name}
-                  onClick={() => setBranch(b.name)}
-                  className={`flex w-full items-center gap-1.5 rounded px-2 py-1 text-left ${branch === b.name ? 'bg-accent-subtle' : 'hover:bg-bg-hover'}`}
-                >
-                  {b.current && <span className="h-1.5 w-1.5 rounded-full bg-accent" />}
-                  <span className="truncate font-mono text-[11px] text-text">{b.name}</span>
-                </button>
+                <div key={b.name} className={`group flex items-center gap-1.5 rounded px-2 py-1 ${branch === b.name ? 'bg-accent-subtle' : 'hover:bg-bg-hover'}`}>
+                  <button onClick={() => setBranch(b.name)} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+                    {b.current && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
+                    <span className="truncate font-mono text-[11px] text-text">{b.name}</span>
+                  </button>
+                  <div className="hidden shrink-0 gap-0.5 group-hover:flex">
+                    {!b.current && <button className="rounded border border-border px-1 py-px text-[9px] text-accent" onClick={() => { if (window.confirm(`合并 ${b.name} 到当前分支？`)) branchExtra('merge', { source: b.name }) }} title="合并到当前分支">⇄</button>}
+                    {!b.current && <button className="rounded border border-border px-1 py-px text-[9px] text-danger" onClick={() => { if (window.confirm(`删除分支 ${b.name}？`)) branchExtra('delete', { name: b.name }) }}>×</button>}
+                  </div>
+                </div>
               ))}
+            </div>
+            <div className="flex gap-1 border-t border-border p-2">
+              <button className="flex-1 rounded border border-border px-2 py-1 text-[10.5px] text-muted hover:bg-bg-hover" onClick={() => branchExtra('stash', { message: `stash ${new Date().toLocaleTimeString('zh-CN')}` })}>Stash</button>
+              <button className="flex-1 rounded border border-border px-2 py-1 text-[10.5px] text-muted hover:bg-bg-hover" onClick={() => branchExtra('stash-pop')}>Pop</button>
             </div>
             <div className="border-t border-border p-2">
               <input
@@ -286,6 +302,7 @@ export default function GitGuiPage() {
                     <div className="hidden gap-1 group-hover:flex">
                       <button className="rounded border border-border px-1.5 py-0.5 text-[10px] text-accent" onClick={() => stageOp('file', { path: f.path })}>暂存</button>
                       <button className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted" onClick={() => showBlame(f)}>Blame</button>
+                      {!f.untracked && <button className="rounded border border-danger px-1.5 py-0.5 text-[10px] text-danger" onClick={() => { if (window.confirm(`丢弃 ${f.path} 的未暂存改动？`)) branchExtra('discard', { path: f.path }) }}>丢弃</button>}
                     </div>
                   </div>
                 ))}

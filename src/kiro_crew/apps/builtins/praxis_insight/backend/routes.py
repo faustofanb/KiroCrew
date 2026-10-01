@@ -625,6 +625,47 @@ async def _gg_branch_op(request: web.Request) -> web.Response:
 
 
 @_guarded
+async def _gg_branch_extra(request: web.Request) -> web.Response:
+    """Merge / delete / discard / stash operations."""
+    import asyncio
+
+    from . import git_gui
+
+    body = await request.json() if request.can_read_body else {}
+    repo = body.get("repo", "")
+    root = _load_root()
+    op = body.get("op", "")
+    try:
+        if op == "merge":
+            return _json(await asyncio.to_thread(git_gui.merge_branch, repo, root, body.get("source", ""), body.get("target", "")))
+        if op == "delete":
+            return _json(await asyncio.to_thread(git_gui.delete_branch, repo, root, body.get("name", ""), bool(body.get("force"))))
+        if op == "discard":
+            return _json(await asyncio.to_thread(git_gui.discard_file, repo, root, body.get("path", "")))
+        if op == "stash":
+            return _json(await asyncio.to_thread(git_gui.stash, repo, root, body.get("message", "")))
+        if op == "stash-pop":
+            return _json(await asyncio.to_thread(git_gui.stash_pop, repo, root))
+        return _json({"error": f"unknown op {op!r}", "code": "bad_request"}, 400)
+    except ValueError as exc:
+        return _json({"error": str(exc), "code": "bad_request"}, 400)
+    except (FileNotFoundError, RuntimeError) as exc:
+        return _json({"error": str(exc), "code": "git_error"}, 409)
+
+
+@_guarded
+async def _gg_stash_list(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_gui
+
+    try:
+        return _json(await asyncio.to_thread(git_gui.stash_list, request.query.get("repo", ""), _load_root()))
+    except FileNotFoundError:
+        return _json({"error": "not found", "code": "not_found"}, 404)
+
+
+@_guarded
 async def _gg_blame(request: web.Request) -> web.Response:
     import asyncio
 
@@ -682,3 +723,5 @@ def register_routes(app: web.Application) -> None:
     r.add_get(f"{_BASE}/gitgui/branches", _gg_branches)
     r.add_post(f"{_BASE}/gitgui/branch", _gg_branch_op)
     r.add_get(f"{_BASE}/gitgui/blame", _gg_blame)
+    r.add_post(f"{_BASE}/gitgui/branch-extra", _gg_branch_extra)
+    r.add_get(f"{_BASE}/gitgui/stash", _gg_stash_list)
