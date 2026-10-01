@@ -4490,6 +4490,32 @@ def _is_untracked_managed_agent_orphan(pid: int, cmdline: bytes, tracked_pids: s
     return _env_has_kirocrew_marker(pid)
 
 
+def reported_untracked_agent_pids() -> set[int]:
+    """The runtimes the last orphan scan reported as untracked -- READ ONLY, grants nothing."""
+    return set(_reported_untracked_agent_pids)
+
+
+def confirm_untracked_agent_runtimes() -> set[int]:
+    """Re-detect untracked runtimes now, for a caller that may act on the answer.
+
+    Unlike the scan's report this requires a COMPLETE tracked snapshot and raises
+    without one, because a dropped row is the input that makes a live runtime look
+    untracked.
+    """
+    tracked, complete = _read_tracked_agent_pids()
+    if not complete:
+        raise RuntimeError("the tracked-pid snapshot is incomplete")
+    found: set[int] = set()
+    for pid in _our_orphan_pids():
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            continue
+        if _is_untracked_managed_agent_orphan(pid, cmdline, tracked):
+            found.add(pid)
+    return found
+
+
 def _work_orphan_session_leader_alive(pid: int) -> bool:
     """True when *pid*'s session LEADER still exists as a session leader.
 
