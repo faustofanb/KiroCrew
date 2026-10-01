@@ -373,6 +373,7 @@ async def _monitor_tick_is_quiet(self: AutoNudgeService, loop: NudgeLoop) -> boo
     probe = probes.build(
         monitor.kind,
         worker_running=self._worker_running,
+        worker_closed=self._worker_closed,
     )
     if probe is None:
         return False
@@ -1001,6 +1002,7 @@ async def _terminal_still_holds(
     probe = probes.build(
         monitor.kind,
         worker_running=self._worker_running,
+        worker_closed=self._worker_closed,
     )
     if target is None or probe is None:
         # Cannot re-check, so cannot confirm. Keep the loop alive.

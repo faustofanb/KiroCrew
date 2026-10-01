@@ -303,10 +303,22 @@ async def _timer(self: AutoNudgeService, loop: NudgeLoop, delay: float | None = 
         # mid-persist. Apply it now that the window is closed — dropping it
         # would leave a dashboard loop with no armed timer at all, since the
         # delivered path relies on notify_turn_complete for those slots.
-        if loop.id in self._rearm_pending:
+        # A pull-forward refused during the same window is applied here too, and at
+        # delay ZERO rather than toward the deadline: it was asking for a cycle NOW
+        # because a worker had just written something, and the cycle that was in flight
+        # read the ledger before that write landed. Draining it in the same place as the
+        # deferred re-arm is deliberate -- one release point per claim, and the immediate
+        # arm supersedes the deadline one when both are held, since a deadline re-arm
+        # would discard the news.
+        pulled_forward = loop.id in self._pulled_forward
+        self._pulled_forward.discard(loop.id)
+        if loop.id in self._rearm_pending or pulled_forward:
             self._rearm_pending.discard(loop.id)
             if loop.active and loop.id in self._loops:
-                self._arm_from_deadline(loop)
+                if pulled_forward:
+                    self._arm_timer(loop, delay=0.0)
+                else:
+                    self._arm_from_deadline(loop)
 
 
 async def _run_fire_cycle(self: AutoNudgeService, loop: NudgeLoop) -> None:
@@ -637,7 +649,9 @@ async def _run_fire_cycle(self: AutoNudgeService, loop: NudgeLoop) -> None:
         self._arm_from_deadline(loop)
 
 
-async def fire_now(self: AutoNudgeService, loop_id: str) -> tuple["NudgeLoop | None", str, int]:
+async def fire_now(
+    self: AutoNudgeService, loop_id: str, *, defer_if_firing: bool = False
+) -> tuple["NudgeLoop | None", str, int]:
     """Bring one loop's next cycle forward to now, out of band from its countdown.
 
     Returns ``(loop, "", 200)`` once the cycle is armed to run, or
@@ -678,6 +692,13 @@ async def fire_now(self: AutoNudgeService, loop_id: str) -> tuple["NudgeLoop | N
       same answer the sibling immediate-trigger route gives for a run
       already in flight (``POST /api/crons/{id}/run`` -> 409).
 
+      ``defer_if_firing`` changes what happens AFTER that refusal, never the refusal
+      itself: the loop is recorded so the end of the in-flight cycle re-arms at delay
+      zero rather than toward the loop's deadline. Opt-in, because a caller with a
+      person behind it reports the refusal and is pressed again, while the crew-log
+      wake's caller is a drain thread with nobody to tell -- and a deadline re-arm on
+      an hours-long patrol cadence would hold a worker's report for hours.
+
     NO SUSPENSION POINT, and that is the design rather than an omission.
     ``async def`` for the caller's convenience, but nothing inside awaits, so
     the guards and the arm are atomic with respect to the event loop: between
@@ -717,6 +738,16 @@ async def fire_now(self: AutoNudgeService, loop_id: str) -> tuple["NudgeLoop | N
     if not loop.active:
         return None, "loop is not active", 409
     if loop_id in self._firing:
+        if defer_if_firing:
+            # The refusal still STANDS as this call's answer -- nothing is armed now, and
+            # the caller is told so -- but the intent is remembered, and
+            # ``_run_fire_cycle``'s tail arms at delay zero instead of toward the
+            # deadline. Opt-in rather than the default because the operator's Fire-now
+            # button reports its own refusal to a person who can press again, while the
+            # crew-log wake has no one to tell: its caller is a drain thread reacting to
+            # a worker's write, and dropping the intent there would make the report wait
+            # out the conductor's whole patrol cadence.
+            self._pulled_forward.add(loop_id)
         return None, "loop is already firing", 409
     self._arm_timer(loop, delay=0.0)
     logger.info(

@@ -180,6 +180,41 @@ def worker_running(slot_table: Any, session_key: str) -> bool:
     return False
 
 
+def worker_closed(slot_table: Any, session_key: str) -> bool:
+    """Whether *session_key*'s slot is GONE from *slot_table*.
+
+    The other half of the gate's liveness question, and a separate function because it
+    is a separate question: :func:`worker_running` asks whether a turn is in flight, and
+    is False for an idle worker that is still there. This asks whether the session ended.
+    ``is_stale`` makes the window apply to the first and not to the second.
+
+    EXISTENCE, not liveness. A slot answering under either spelling means the session is
+    open, whatever it is doing.
+
+    Anything unreadable answers False, which is the direction that cannot invent a stall:
+    a slot table this cannot interrogate leaves the staleness window measuring time, which
+    is what shipped. Note the asymmetry with :func:`worker_running`, whose safe direction
+    is also False -- there "unknown" must not SUPPRESS a wake, here it must not CAUSE one,
+    and False happens to be both.
+    """
+    if slot_table is None or not session_key:
+        return False
+    getter = getattr(slot_table, "get_slot", None)
+    if not callable(getter):
+        return False
+    for candidate in (session_key, f"dashboard_{session_key}"):
+        try:
+            slot = getter(candidate)
+        except Exception:
+            # An unreadable table cannot prove a close, so report none rather than
+            # continuing to the next spelling and reading its miss as evidence.
+            logger.debug("wake gate: slot lookup failed for %s", candidate, exc_info=True)
+            return False
+        if slot is not None:
+            return False
+    return True
+
+
 def revision(newest_event_ids: dict[str, str]) -> str:
     """The epoch token for one tick: a digest over the newest event id per item.
 

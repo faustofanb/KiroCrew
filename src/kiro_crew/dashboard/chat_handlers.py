@@ -7262,6 +7262,26 @@ async def _await_guarded_history_write(slot: "_ChatSlot", name: str) -> bool:
         await asyncio.wait(pending, timeout=remaining)
 
 
+async def _wake_conductor_for_closed_worker(name: str) -> None:
+    """Pull *name*'s conductor's work-ledger tick forward, if *name* was a bound worker.
+
+    NEVER RAISES. A close is a user action with rollback paths for its own four failure
+    modes; "the conductor was not told early" is not one of them, because the conductor's
+    scheduled tick reads the same ledger a cadence later. So every failure here is a
+    DEBUG line and the close proceeds.
+
+    The import is function-local: ``conductor_wake`` reaches the work-ledger store, and
+    every gateway runs this close path whether or not any conductor has ever opened a
+    ledger.
+    """
+    try:
+        from kiro_crew import conductor_wake
+
+        await conductor_wake.fire_for_worker_slot(name)
+    except Exception:  # noqa: BLE001 - a push must never fail a close
+        logger.debug("conductor wake on close failed for %s", name, exc_info=True)
+
+
 async def close_slot(
     state: DashboardState,
     slot: "_ChatSlot",
@@ -7497,6 +7517,18 @@ async def _close_slot(
             state.push_slots_update()
             raise
     state._slots.pop(name, None)
+    # TRIGGER TWO of the crew-log wake. The slot is GONE as of the line above, which is
+    # what makes this the right moment rather than a few lines earlier: the conductor's
+    # probe answers "is this worker closed" by looking the slot up, so firing while it
+    # was still registered would hand the gate the pre-close answer and waste the turn.
+    #
+    # Only a bound worker's close reaches a conductor, and that is decided by the binding
+    # rather than here (:mod:`kiro_crew.conductor_wake`). Awaited rather than detached:
+    # the binding read is offloaded inside and ``fire_now`` has no suspension point, so
+    # this adds one executor hop to a teardown that has already awaited several -- and a
+    # detached task would outlive the close and could fire after a same-key recreate.
+    # Never raises, so it cannot abort a close.
+    await _wake_conductor_for_closed_worker(name)
     # Release any blocking wait before cancelling the task: a question pending on
     # the blocking POST /api/ask-question path holds an MCP worker on an open
     # HTTP request, and the slot is going away, so nobody will answer its card.

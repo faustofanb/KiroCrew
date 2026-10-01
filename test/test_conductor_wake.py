@@ -1,0 +1,466 @@
+"""The crew-log wake: a worker's write, close or turn end pulls its conductor forward.
+
+``rfc-crew-log-wake``. One lookup (``conductor_wake``) and three triggers that share it.
+What is pinned here is the WIRING -- that each trigger resolves the binding, finds the
+conductor's armed work-ledger loop and calls ``fire_now`` on it, and that none of them
+fires for a slot with no binding. What the conductor then DOES with the tick is Phase 3's
+gate and is pinned in ``test_probe_work_ledger.py``; the one piece of that this file does
+own is the ``worker_closed`` probe input, because it is this change's addition to the
+staleness conjunction.
+
+No gateway runs in any of these. The service is a stub with the three attributes the
+lookup reads, which is what makes a wiring defect here impossible to mistake for a
+service defect.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from kiro_crew import conductor_wake, work_ledger
+
+CONDUCTOR = "chat-conductor"
+WORKER = "chat-worker"
+LOOP_ID = "loop-1"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    """Own data home per test, so no binding file outlives its own test."""
+    monkeypatch.setenv("KIROCREW_HOME", str(tmp_path / "home"))
+
+
+# ── stubs ────────────────────────────────────────────────────────────────────
+
+
+class _Monitor:
+    def __init__(self, kind: str = "work-ledger") -> None:
+        self.kind = kind
+        self.target = CONDUCTOR
+        # The REAL current version, read rather than written: both zero-delay arms refuse a
+        # record this gateway cannot interpret, so a stub pinning a literal here would stop
+        # exercising that refusal the moment the version moved.
+        from kiro_crew.monitoring.models import MONITOR_STATE_VERSION
+
+        self.version = MONITOR_STATE_VERSION
+
+
+class _Loop:
+    def __init__(self, *, kind: str = "work-ledger", active: bool = True) -> None:
+        self.id = LOOP_ID
+        self.slot_key = CONDUCTOR
+        self.active = active
+        self.monitor = _Monitor(kind) if kind else None
+
+
+class _Svc:
+    """The three things the lookup reads off a service, and nothing else.
+
+    ``_reconciler`` is how the thread entry point finds the event loop to schedule onto;
+    the real service holds the same attribute for the same task.
+    """
+
+    def __init__(self, loop: "_Loop | None" = None, *, refuse: str = "") -> None:
+        self._loop = loop
+        self._refuse = refuse
+        self.fired: list[str] = []
+        self.deferred: list[str] = []
+        self._reconciler = None
+        self._timers: dict[str, object] = {}
+
+    def get_by_slot(self, slot_key: str) -> "_Loop | None":
+        return self._loop if self._loop is not None and slot_key == CONDUCTOR else None
+
+    async def fire_now(self, loop_id, *, defer_if_firing=False):
+        if self._refuse:
+            if defer_if_firing:
+                self.deferred.append(loop_id)
+            return None, self._refuse, 409
+        self.fired.append(loop_id)
+        return self._loop, "", 200
+
+
+def _bind(worker: str = WORKER, *, status: str | None = None, verdict: str = "") -> str:
+    """A real conductor ledger with one item bound to *worker*. Returns the item id.
+
+    A real store rather than a fake one, because the binding file IS what the lookup
+    reads: a stubbed resolver here would pin this test against itself.
+    """
+    work_ledger.ensure_conductor(CONDUCTOR, goal="drive the fleet")
+    created = work_ledger.apply_conductor_action(
+        CONDUCTOR, "create", title="t", acceptance={"kind": "human_approval"}
+    )
+    item_id = str(created["item"].item_id)
+    work_ledger.apply_conductor_action(
+        CONDUCTOR, "bind", item_id=item_id, worker_session_key=worker
+    )
+    if status is not None:
+        work_ledger.apply_worker_report(CONDUCTOR, item_id, status=status, summary="s")
+    if verdict:
+        work_ledger.apply_conductor_action(
+            CONDUCTOR, "verdict", item_id=item_id, verdict=verdict, fails=1
+        )
+    return item_id
+
+
+def _item(item_id: str):
+    found = work_ledger.read_work_item(CONDUCTOR, item_id)
+    assert found is not None
+    return found
+
+
+# ── the shared lookup ────────────────────────────────────────────────────────
+
+
+def test_a_bound_workers_slot_resolves_its_conductors_armed_work_ledger_loop():
+    _bind()
+    svc = _Svc(_Loop())
+    assert asyncio.run(_fire(svc, WORKER)) == LOOP_ID
+    assert svc.fired == [LOOP_ID]
+
+
+def test_an_unbound_slot_fires_nothing():
+    """The whole no-op case, and the reason the binding is the gate rather than the board.
+
+    A conductor's OWN ``work/recorded`` entries take this path too; a conductor slot has
+    no binding as a worker, so it resolves nothing without this module knowing what a
+    conductor is.
+    """
+    _bind()
+    svc = _Svc(_Loop())
+    assert asyncio.run(_fire(svc, "chat-stranger")) == ""
+    assert svc.fired == []
+
+
+def test_a_loop_watching_another_kind_is_not_fired():
+    """Its budget was armed for a pull request; ledger news is not its subject."""
+    _bind()
+    svc = _Svc(_Loop(kind="gh-pr"))
+    assert asyncio.run(_fire(svc, WORKER)) == ""
+    assert svc.fired == []
+
+
+def test_an_inactive_loop_is_not_fired():
+    _bind()
+    svc = _Svc(_Loop(active=False))
+    assert asyncio.run(_fire(svc, WORKER)) == ""
+    assert svc.fired == []
+
+
+def test_a_conductor_with_no_loop_at_all_fires_nothing():
+    _bind()
+    svc = _Svc(None)
+    assert asyncio.run(_fire(svc, WORKER)) == ""
+
+
+def test_a_monitor_record_from_a_newer_gateway_is_not_pulled_forward():
+    """``fire_now`` arms through ``_arm_timer``, which carries no version test.
+
+    ``_arm_from_deadline`` refuses a record this gateway cannot interpret, because running
+    the loop would deliver an unattended turn under a newer gateway's policy. A work-ledger
+    watch is a ``gate=True`` prompt loop, so ``_load`` leaves such a row ACTIVE -- so the
+    push has to carry the same refusal or it is a way around that one.
+    """
+    from kiro_crew.monitoring.models import MONITOR_STATE_VERSION
+
+    _bind()
+    loop = _Loop()
+    loop.monitor.version = MONITOR_STATE_VERSION + 1
+    svc = _Svc(loop)
+    assert asyncio.run(_fire(svc, WORKER)) == ""
+    assert svc.fired == []
+
+
+def test_the_startup_resume_refuses_a_newer_gateways_record():
+    """The same refusal on the boot path, where the zero-delay arm bypassed it.
+
+    Asserted through the predicate the resume branches on rather than by booting a service:
+    a False answer sends the row to ``_arm_from_deadline``, which already refuses it and
+    logs why, so the refusal lives in one place.
+    """
+    from kiro_crew.autonudge import AutoNudgeService
+    from kiro_crew.monitoring.models import MONITOR_STATE_VERSION
+
+    current = _Loop()
+    assert AutoNudgeService._observes_work_ledger(None, current) is True
+    future = _Loop()
+    future.monitor.version = MONITOR_STATE_VERSION + 1
+    assert AutoNudgeService._observes_work_ledger(None, future) is False
+    assert AutoNudgeService._observes_work_ledger(None, _Loop(kind="gh-pr")) is False
+    assert AutoNudgeService._observes_work_ledger(None, _Loop(kind="")) is False
+
+
+def test_a_refused_fire_does_not_raise_and_records_the_deferred_pull_forward():
+    """``fire_now``'s mid-fire 409 is an answer, not a fault.
+
+    Two things are pinned: the caller sees ``""`` rather than an exception -- a trigger
+    that has already observed the entry must not break on the attempt to tell someone --
+    and ``defer_if_firing`` is passed, so the re-arm at the end of the in-flight cycle
+    runs at delay zero instead of aiming at the loop's own deadline.
+    """
+    _bind()
+    svc = _Svc(_Loop(), refuse="loop is already firing")
+    assert asyncio.run(_fire(svc, WORKER)) == ""
+    assert svc.fired == []
+    assert svc.deferred == [LOOP_ID]
+
+
+async def _fire(svc, worker_slot: str) -> str:
+    """Drive ``fire_for_worker_slot`` with *svc* standing in for the live service."""
+    import kiro_crew.autonudge as autonudge
+
+    original = autonudge.get_instance
+    autonudge.get_instance = lambda: svc  # type: ignore[assignment]
+    try:
+        return await conductor_wake.fire_for_worker_slot(worker_slot)
+    finally:
+        autonudge.get_instance = original  # type: ignore[assignment]
+
+
+# ── trigger one: the crew-log eager drain ────────────────────────────────────
+
+
+def test_a_work_recorded_entry_from_a_bound_worker_pushes_on_the_drain(monkeypatch):
+    """The second consumer on the drain, and it keys on the WRITER's slot.
+
+    Driven through ``_push_conductor_wakes`` with a stubbed slot resolver rather than
+    through a live crew log: what this pins is which wakes the consumer selects and whose
+    slot it resolves them to, and a real log would make a selection defect look like a
+    projection defect.
+    """
+    from kiro_crew.crew_log import eager
+
+    pushed: list[str] = []
+    monkeypatch.setattr(eager, "_slot_of", lambda unit_id: f"chat-{unit_id}")
+    monkeypatch.setattr(
+        conductor_wake, "fire_for_worker_slot_from_thread", lambda slot: pushed.append(slot) or True
+    )
+    batch = {
+        ("u1", CONDUCTOR): eager._Wake("u1", "work/recorded", 4, CONDUCTOR),
+        ("u2", ""): eager._Wake("u2", "panel/published", 2, ""),
+        ("u3", ""): eager._Wake("u3", "session/closed", 7, ""),
+    }
+    eager._push_conductor_wakes(batch)
+    assert pushed == ["chat-u1"]
+
+
+def test_one_workers_several_entries_in_a_batch_push_once(monkeypatch):
+    """The push is a deadline move, so two of them for one batch arm one tick twice."""
+    from kiro_crew.crew_log import eager
+
+    pushed: list[str] = []
+    monkeypatch.setattr(eager, "_slot_of", lambda unit_id: WORKER)
+    monkeypatch.setattr(
+        conductor_wake, "fire_for_worker_slot_from_thread", lambda slot: pushed.append(slot) or True
+    )
+    batch = {
+        ("u1", CONDUCTOR): eager._Wake("u1", "work/recorded", 4, CONDUCTOR),
+        ("u1", "chat-other"): eager._Wake("u1", "work/recorded", 5, "chat-other"),
+    }
+    eager._push_conductor_wakes(batch)
+    assert pushed == [WORKER]
+
+
+def test_a_raising_push_neither_blocks_the_drain_nor_skips_the_fold(monkeypatch):
+    """Driven through the REAL worker thread, because the guard is in the loop body.
+
+    Two independent consumers share one batch and one ``finally`` that settles the
+    counters. So a raising wake must not take the fold with it, and must not strand a
+    waiter on ``drain`` -- which is what asserting ``drain`` returns ``True`` proves,
+    since it waits for settled to reach queued rather than for the queue to empty.
+
+    The control is the fold call: if it never ran, this test would pass for the wrong
+    reason (nothing was consumed at all).
+    """
+    from kiro_crew.crew_log import eager
+
+    folded: list[int] = []
+
+    def _boom(_slot):
+        raise RuntimeError("binding store on fire")
+
+    monkeypatch.setattr(eager, "_fold_batch", lambda batch, closers=None: folded.append(len(batch)))
+    monkeypatch.setattr(conductor_wake, "fire_for_worker_slot_from_thread", _boom)
+    monkeypatch.setattr(eager, "_slot_of", lambda unit_id: WORKER)
+    eager.resume_for_tests()
+    try:
+        eager.note_commit("u1", "work/recorded", 4, CONDUCTOR)
+        assert eager.drain(timeout=10.0) is True
+    finally:
+        eager.stop_for_tests()
+    assert folded == [1], "the fold consumer must still have run"
+
+
+# ── trigger two: a worker session closes ─────────────────────────────────────
+
+
+def test_the_close_path_pushes_through_the_shared_lookup():
+    """``close_slot``'s hook, driven directly: the close is already covered elsewhere.
+
+    What is pinned is that the hook reaches the shared lookup with the closing slot's own
+    name, and that it swallows a failure -- a close has rollback paths for its own four
+    failure modes, and "the conductor heard late" is not one of them.
+    """
+    from kiro_crew.dashboard import chat_handlers
+
+    seen: list[str] = []
+
+    async def _drive(resolver) -> None:
+        original = conductor_wake.fire_for_worker_slot
+        conductor_wake.fire_for_worker_slot = resolver  # type: ignore[assignment]
+        try:
+            await chat_handlers._wake_conductor_for_closed_worker(WORKER)
+        finally:
+            conductor_wake.fire_for_worker_slot = original  # type: ignore[assignment]
+
+    async def _record(slot_key: str) -> str:
+        seen.append(slot_key)
+        return LOOP_ID
+
+    asyncio.run(_drive(_record))
+    assert seen == [WORKER]
+
+    async def _boom(_slot_key: str) -> str:
+        raise RuntimeError("ledger store on fire")
+
+    # Does not propagate: the close must finish.
+    asyncio.run(_drive(_boom))
+
+
+# ── trigger three: a worker turn ends ────────────────────────────────────────
+
+
+def test_a_turn_end_from_a_bound_worker_schedules_a_push():
+    """Outcome-blind, and that is what this trigger adds.
+
+    A turn that raised, or ended without reporting, writes no ``work/recorded`` entry at
+    all, so trigger one never sees it. This hook is called for every turn end.
+    """
+    from kiro_crew.autonudge_service import timers
+
+    scheduled: list[str] = []
+
+    class _Service:
+        _inflight_adds: set = set()
+
+    async def _drive() -> None:
+        original = conductor_wake.fire_for_worker_slot
+
+        async def _record(slot_key: str) -> str:
+            scheduled.append(slot_key)
+            return LOOP_ID
+
+        conductor_wake.fire_for_worker_slot = _record  # type: ignore[assignment]
+        try:
+            timers._wake_bound_conductor(_Service(), WORKER)
+            await asyncio.sleep(0)
+        finally:
+            conductor_wake.fire_for_worker_slot = original  # type: ignore[assignment]
+
+    asyncio.run(_drive())
+    assert scheduled == [WORKER]
+
+
+def test_a_turn_end_with_no_running_event_loop_is_a_no_op():
+    """A synchronous driver or a shutdown path has nothing to schedule onto."""
+    from kiro_crew.autonudge_service import timers
+
+    class _Service:
+        _inflight_adds: set = set()
+
+    timers._wake_bound_conductor(_Service(), WORKER)
+
+
+# ── the probe's new input: worker_closed ─────────────────────────────────────
+
+
+def test_an_open_worker_move_item_whose_worker_closed_is_stale_at_once():
+    """The window separates a thinking worker from a gone one; a close is not ambiguous."""
+    item_id = _bind(status="progress")
+    item = _item(item_id)
+    assert not work_ledger.is_stale(item, worker_running=False, window_secs=3600)
+    assert work_ledger.is_stale(item, worker_running=False, worker_closed=True, window_secs=3600)
+
+
+def test_a_done_item_is_not_woken_by_its_workers_close():
+    """The move is the conductor's, so the worker's silence is the expected end."""
+    item_id = _bind(status="done")
+    item = _item(item_id)
+    assert not work_ledger.is_stale(item, worker_running=False, worker_closed=True, window_secs=0)
+
+
+def test_a_done_item_ruled_fail_is_woken_by_the_close():
+    """A failed verdict on a still-open item hands the retry back to the worker."""
+    item_id = _bind(status="done", verdict="fail")
+    item = _item(item_id)
+    assert work_ledger.is_stale(item, worker_running=False, worker_closed=True, window_secs=3600)
+
+
+def test_an_item_that_never_reported_keeps_the_window_even_when_closed():
+    """The bind-to-first-report gap, which is what the window was written for.
+
+    ``worker_closed`` is answered by FAILING to find a session, and for a worker that has
+    never reported that absence is as likely to mean "not registered yet" as "gone" -- a
+    slot table still rehydrating, a boot tick, a key that table does not carry. This PR
+    makes ticks land in those moments far more often (a boot tick, and a pull-forward on
+    any sibling worker's write), so without the report requirement the conductor would
+    spend a turn on "worker gone" for a worker about to register.
+    """
+    item_id = _bind()
+    item = _item(item_id)
+    assert item.last_report_at in (None, "")
+    assert not work_ledger.is_stale(
+        item, worker_running=False, worker_closed=True, window_secs=3600
+    )
+    # The window still decides it, exactly as before this input existed.
+    assert work_ledger.is_stale(item, worker_running=False, worker_closed=True, window_secs=0)
+
+
+def test_a_running_worker_is_never_stale_even_closed():
+    """``worker_closed`` removes the window, never the rest of the conjunction."""
+    item_id = _bind(status="progress")
+    item = _item(item_id)
+    assert not work_ledger.is_stale(item, worker_running=True, worker_closed=True, window_secs=0)
+
+
+def test_the_probe_reads_a_closed_worker_through_its_injected_resolver():
+    """The probe takes the answer as a value, like liveness, and for the same reason."""
+    from kiro_crew.probes.work_ledger import WorkLedgerProbe
+
+    probe = WorkLedgerProbe(worker_closed=lambda key: key == WORKER)
+    assert probe._worker_closed(WORKER) is True
+    assert probe._worker_closed("chat-other") is False
+    # And a build with no resolver measures the window exactly as it did before.
+    assert WorkLedgerProbe()._worker_closed(WORKER) is False
+
+
+def test_build_passes_both_resolvers_to_the_work_ledger_probe():
+    from kiro_crew import probes
+
+    probe = probes.build(
+        probes.WORK_LEDGER, worker_running=lambda _k: True, worker_closed=lambda _k: True
+    )
+    assert probe is not None
+    assert probe._worker_running(WORKER) is True
+    assert probe._worker_closed(WORKER) is True
+
+
+def test_worker_closed_reads_existence_not_liveness():
+    """``ledger_wake``'s binding: a slot that answers is open, whatever it is doing."""
+    from kiro_crew import ledger_wake
+
+    class _Table:
+        def __init__(self, keys):
+            self._keys = keys
+
+        def get_slot(self, key):
+            return object() if key in self._keys else None
+
+    assert ledger_wake.worker_closed(_Table({WORKER}), WORKER) is False
+    assert ledger_wake.worker_closed(_Table({f"dashboard_{WORKER}"}), WORKER) is False
+    assert ledger_wake.worker_closed(_Table(set()), WORKER) is True
+    # An unreadable table cannot PROVE a close, so it reports none.
+    assert ledger_wake.worker_closed(None, WORKER) is False
+    assert ledger_wake.worker_closed(_Table(set()), "") is False
