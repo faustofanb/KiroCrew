@@ -793,6 +793,13 @@ class OrphanStallMonitor(ManagerComponent):
                 self._manager._live_shared_count(info._pid, agents) if info._session_sharing else 1
             )
             generation = info._rss_generation
+            # Snapshot the tool state BEFORE the off-loop subtree read: the quiet
+            # condition must hold ACROSS the whole sampling window, not merely at
+            # the guard below. A tool that starts, or starts and clears, during
+            # the ``_proc_subtree_sample`` read grows the subtree the read sees
+            # while ``_inflight_tool`` could read None again by the time the
+            # guard runs — so require it None before AND unchanged after.
+            tool_before = info._inflight_tool
             sample = _proc_subtree_sample(info._pid)
             if info._rss_generation != generation:
                 # The run was respawned while this off-loop read was in flight:
@@ -823,16 +830,22 @@ class OrphanStallMonitor(ManagerComponent):
                 # generation, not on ``<= 0.0``, so a respawn re-captures for the
                 # fresh process without discarding the dead one's valid reading
                 # in the window before the fresh process is sampled. A run in
-                # startup, or one with a tool in flight at every post-startup
-                # sweep, records nothing and ``_record_cost`` falls back to the
-                # peak. The guard and the tag use the LOCAL ``generation`` read
-                # before the off-loop sample (and proven current by the recheck
-                # above), never a fresh ``info._rss_generation``: a respawn after
-                # the recheck must not let this reading be stamped as the new
-                # process's.
+                # startup, or one with a tool in flight at (or across) every
+                # post-startup sweep, records no settled reading and
+                # ``_record_cost`` records no memory sample for it — it must NOT
+                # fall back to the whole-subtree peak, which for such a run IS
+                # the workload. The guard and the tag use the LOCAL ``generation``
+                # read before the off-loop sample (and proven current by the
+                # recheck above), never a fresh ``info._rss_generation``: a
+                # respawn after the recheck must not let this reading be stamped
+                # as the new process's. The tool check is both-ended — None in
+                # ``tool_before`` and still None now — so a tool that started (or
+                # started and cleared) during the subtree read cannot pass as a
+                # quiet sample.
                 if (
                     info._settled_rss_generation != generation
                     and info._first_stream_started is not None
+                    and tool_before is None
                     and info._inflight_tool is None
                 ):
                     info.settled_rss_gb = gb
@@ -855,17 +868,24 @@ class OrphanStallMonitor(ManagerComponent):
 
         The recorded ``mem_gb`` is the SETTLED-runtime reading
         (``settled_rss_gb``: the agent's own kiro-cli + MCP-server footprint,
-        sampled once after startup with no tool in flight), NOT the whole-subtree
-        ``peak_rss_gb``. The cap divides available memory by
-        ``read_learned_cost("mem_gb")``, so recording the peak would price a run's
-        build or test subtree as the agent's own cost and hold the cap at the
-        floor. The peak is the divisor only when a run finished before any clean
-        post-startup sweep took a settled reading — a short run whose peak is its
-        own runtime anyway. CPU is telemetry only and keeps its whole-run peak.
+        sampled once after startup with no tool in flight). When no such verified
+        quiet sample was ever taken — ``settled_rss_gb`` is 0.0 — the memory
+        figure is OMITTED rather than falling back to ``peak_rss_gb``. The peak
+        is the whole process subtree, so for a run whose every sweep landed with
+        a tool in flight (one long build or test call spanning the whole run) the
+        peak IS that workload's RSS; recording it as the learned cost would price
+        the workload as the agent's own footprint and pin the auto cap at the
+        floor — the exact defect this change removes. The read path ignores a
+        ``mem_gb`` of 0 (``subagent_cost._group_by_agent`` keeps only ``v > 0``),
+        so omitting it simply contributes no memory sample for that run; a run
+        with no quiet sample should teach the cap nothing rather than teach it
+        the workload peak. CPU is telemetry only, keeps its whole-run peak, and
+        is still recorded (the read path reads ``cpu_cores`` independently), so
+        an omitted memory figure does not cost the CPU sample.
         """
-        mem_gb = info.settled_rss_gb if info.settled_rss_gb > 0.0 else info.peak_rss_gb
+        mem_gb = info.settled_rss_gb if info.settled_rss_gb > 0.0 else 0.0
         if mem_gb <= 0 and info.peak_cpu_cores <= 0:
-            return  # never sampled (e.g. finished before the first reaper sweep)
+            return  # nothing worth recording (no quiet mem sample, no CPU)
         try:
             append_cost_sample(
                 _cost_bucket(info.agent, info.execution_context),

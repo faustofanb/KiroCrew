@@ -2474,11 +2474,13 @@ class SubagentInfo:
     # the agent leaves running, is not counted, so the recorded cost can
     # undercount a run's true footprint — the per-spawn reserve (``_startup_cost_gb``)
     # is what covers that gap against OOM (see dynamic-subagent-sizing.md §4.1).
-    # 0.0 until the first clean post-startup sweep observes this run;
-    # ``_record_cost`` falls back to ``peak_rss_gb`` only when no such reading was
-    # taken. A cancel-recovery respawn KEEPS this reading (it is the dead
-    # process's own runtime, a valid figure) until the fresh process captures its
-    # own — see ``_settled_rss_generation``.
+    # 0.0 until the first quiet post-startup sweep observes this run; a run that
+    # never recorded one teaches the cap nothing — ``_record_cost`` OMITS the
+    # memory sample rather than falling back to ``peak_rss_gb``, since for a run
+    # whose every sweep had a tool in flight the peak IS that workload. A
+    # cancel-recovery respawn KEEPS this reading (it is the dead process's own
+    # runtime, a valid figure) until the fresh process captures its own — see
+    # ``_settled_rss_generation``.
     settled_rss_gb: float = 0.0
     # The ``_rss_generation`` the held ``settled_rss_gb`` was captured under, or
     # -1 when none has been. The sweep captures a fresh settled reading when this

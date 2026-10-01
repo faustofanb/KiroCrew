@@ -116,11 +116,15 @@ Kiro Crew doesn't hard-code how much an agent costs — it measures it:
 - At exit, one sample `{agent, mem_gb, cpu_cores, ts}` is appended to
   `~/.kiro/crew/subagents/cost_samples.jsonl`, where `mem_gb` is that
   settled reading. The CPU figure is telemetry only; sizing reads `mem_gb`. A
-  run that finished before any clean post-startup sweep took a settled reading
-  records its peak instead — a short run whose peak is its own runtime anyway. A
-  cancel-recovery respawn keeps the dead process's settled reading (a valid
-  per-agent figure) until the fresh process captures its own clean one, rather
-  than reverting to the whole-subtree peak in the window before that lands.
+  run that never took a quiet settled reading — every sweep landed with a tool
+  in flight, e.g. one long build or test call spanning the whole run — records
+  **no** memory sample: `mem_gb` is omitted (written as 0, which the read path
+  ignores) rather than falling back to `peak_rss_gb`, because for such a run the
+  peak IS that workload and recording it would re-introduce the floor-pinning
+  this change removes. Its CPU sample is still recorded. A cancel-recovery
+  respawn keeps the dead process's settled reading (a valid per-agent figure)
+  until the fresh process captures its own clean one, rather than reverting to
+  the whole-subtree peak in the window before that lands.
 - At the next startup, Kiro Crew takes the **p90 of the last N memory samples
   per agent name** (robust to the occasional outlier run), then the worst case
   across agent types, as the divisor.
