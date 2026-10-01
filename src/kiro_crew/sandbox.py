@@ -3704,7 +3704,9 @@ def _masked_crew_home_roots() -> list[str]:
 
     Ordered live-home-first so a refusal names the home the operator is most likely
     looking at, and de-duplicated so a relocation that happens to coincide with a prefix
-    is visited once.
+    is visited once. Live-first is also what keeps the occupant pass and the launcher's
+    lists in step: both spell a symlinked home's leaves the resolved way, the pass by
+    walking this root and the builder by folding the ``$HOME`` spellings onto it.
 
     De-duplicated by DIRECTORY INODE, not by path string. A host part-way through a migration
     legitimately points the legacy spelling AT the live home -- this module's own alias pass
@@ -5446,6 +5448,78 @@ _CC_DIRS += _CREW_HIDDEN_DIRS
 _CC_DIRS += [".midway"]
 
 
+def _same_directory(left: str, right: str) -> bool:
+    """Whether two path spellings reach one directory now, by ``(st_dev, st_ino)``.
+
+    ``stat`` follows links, because the question is what each NAME reaches -- the
+    object a mask lands on -- not what occupies the name. A spelling that cannot be
+    stat'ed is a different directory: the caller then keeps its entry, and the
+    launcher decides what an absent name means.
+    """
+    if left == right:
+        return True
+    try:
+        a = os.stat(left)
+        b = os.stat(right)
+    except OSError:
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino) and stat.S_ISDIR(a.st_mode)
+
+
+def _crew_home_alias_roots() -> tuple[tuple[str, str, int, int], ...]:
+    """``(alias, canonical, st_dev, st_ino)``: each ``$HOME``-joined crew root that IS the data home.
+
+    The tier lists spell every crew leaf under ``$HOME/<prefix>`` and the pre-spawn
+    passes spell it under ``config_dir()``, which is resolved. On a host whose home
+    is a link (``/home/u -> /mnt/home/u``) those are two names for one directory, and
+    the launcher keeps every record per name -- the occupant a pass saw, the stand-in
+    a loop placed -- and compares them against the filesystem by identity, so two
+    names make the records disagree with what either name reaches. One ``stat`` per
+    crew root decides it here, in the pass that already stats these roots, and the
+    builder folds the alias spelling onto the canonical one so the launcher is
+    handed one name per directory. A root string-equal to the data home is no
+    alias; an absent or unreadable root is left as it is, since the launcher
+    already handles an absent name.
+
+    The identity the decision rested on travels with the pair. The fold is a
+    check made here and acted on in the child, and the component that makes the
+    two spellings one directory -- the home link -- is a name a writer could
+    re-aim in between; the launcher re-reads each alias before it places a mask
+    and refuses unless it still reaches the recorded directory, so the folded
+    rules never stand for an alias that has moved.
+
+    Never raises: a home that cannot be resolved yields no pair.
+    """
+    try:
+        canonical = str(config_dir())
+        home = Path.home()
+    except Exception:  # pragma: no cover - defensive; a spawn must not fail on this
+        logger.debug("could not resolve the crew data home for the alias fold", exc_info=True)
+        return ()
+    pairs: list[tuple[str, str, int, int]] = []
+    for prefix in _CREW_HOME_PREFIXES:
+        alias = str(home / Path(prefix))
+        if alias == canonical:
+            continue
+        try:
+            info = os.stat(canonical)
+        except OSError:
+            continue
+        if _same_directory(alias, canonical):
+            pairs.append((alias, canonical, info.st_dev, info.st_ino))
+    return tuple(pairs)
+
+
+def _fold_crew_home_alias(path: str, aliases: tuple[tuple[str, str, int, int], ...]) -> str:
+    """*path* respelled under the canonical root when it sits under an alias root."""
+    for alias, canonical, _dev, _ino in aliases:
+        if path == alias:
+            return canonical
+        if path.startswith(alias.rstrip("/") + "/"):
+            return canonical.rstrip("/") + path[len(alias.rstrip("/")) :]
+    return path
+
+
 def _relocated_crew_targets(leaves: tuple[str, ...]) -> list[str]:
     """The RESOLVED crew-home paths for *leaves*, when the data home is not under ``$HOME``.
 
@@ -5456,13 +5530,15 @@ def _relocated_crew_targets(leaves: tuple[str, ...]) -> list[str]:
     need it for the same reason, so the resolution is shared here instead of restated.
 
     Returns only the paths that DIFFER from the ``$HOME``-relative spelling the lists
-    already carry, so the default layout gains no duplicate rule.
+    already carry, so the default layout gains no duplicate rule. Under a symlinked
+    home the resolved spelling differs as a STRING from the ``$HOME`` one while
+    naming the same directory; ``_build_launcher_script`` folds the ``$HOME``
+    spellings onto the resolved one (see ``_crew_home_alias_roots``) so the launcher
+    is handed one name per directory.
 
-    ``normpath``, never ``realpath`` — this runs inside ``_build_launcher_script`` and the
-    seatbelt builder, which execute on the event loop for every async spawn, and a
-    link-resolving syscall on a stalled NFS home would freeze the gateway with its
-    liveness heartbeat. A symlinked home therefore reports as relocated and yields a
-    redundant rule for a path that is covered either way, never a missing one.
+    ``normpath``, never ``realpath``: lexical on purpose, so this helper itself does
+    no filesystem call; the one identity decision per crew root is made in the
+    pre-spawn pass that already stats those roots.
 
     Never raises: a data home that cannot be resolved yields nothing and the
     ``$HOME``-relative entries still apply.
@@ -8074,6 +8150,7 @@ def _build_launcher_script(
     fail_closed_file_masks: tuple[tuple[str, int, int], ...] = (),
     required_mask_targets: tuple[str, ...] = (),
     mask_occupants: "Mapping[str, tuple[int, ...]] | None" = None,
+    crew_home_aliases: tuple[tuple[str, str, int, int], ...] = (),
 ) -> str:
     """Build a Python launcher script for the Linux namespace sandbox.
 
@@ -8141,6 +8218,35 @@ def _build_launcher_script(
     hidden_dirs.extend(_md_notebook_degraded_mask_dirs())
     hidden_dirs.extend(_voice_runtime_sandbox_paths())
     hidden_dirs.extend(os.path.abspath(path) for path in extra_hidden_dirs)
+    # One name per directory. ``crew_home_aliases`` names each ``$HOME``-joined crew
+    # root that is the data home itself reached through a link; every path under such
+    # a root is respelled under the resolved root, which is how the pre-spawn passes
+    # already spell the leaves they record. Pure string work: the identity decision
+    # was made once per root by the caller, so this builder still makes no
+    # filesystem call. The carve-out and window spellings go through the same fold,
+    # so a caller naming the alias spelling still lifts or re-opens what it asked for.
+    hidden_dirs = [_fold_crew_home_alias(path, crew_home_aliases) for path in hidden_dirs]
+    extra_visible_dirs = tuple(
+        _fold_crew_home_alias(os.path.abspath(path), crew_home_aliases)
+        for path in extra_visible_dirs
+    )
+    extra_private_dirs = tuple(
+        _fold_crew_home_alias(path, crew_home_aliases) for path in extra_private_dirs
+    )
+    extra_private_dir_ids = tuple(
+        (_fold_crew_home_alias(p, crew_home_aliases), dev, ino)
+        for p, dev, ino in extra_private_dir_ids
+    )
+    extra_hidden_dir_ids = tuple(
+        (_fold_crew_home_alias(p, crew_home_aliases), dev, ino)
+        for p, dev, ino in extra_hidden_dir_ids
+    )
+    extra_writable_dirs = tuple(
+        _fold_crew_home_alias(path, crew_home_aliases) for path in extra_writable_dirs
+    )
+    required_mask_targets = tuple(
+        _fold_crew_home_alias(path, crew_home_aliases) for path in required_mask_targets
+    )
     unhidden = [
         path for path in hidden_dirs if _hidden_path_contains_visible_path(path, extra_visible_dirs)
     ]
@@ -8165,9 +8271,9 @@ def _build_launcher_script(
     # REMOVE it. A caller's ``extra_visible_dirs`` cannot re-open the write side, for the
     # reason spelled out for the governance cache above.
     readonly_dirs.extend(
-        os.path.join(home, target)
+        _fold_crew_home_alias(os.path.join(home, target), crew_home_aliases)
         for target in _CREW_READONLY_TARGETS
-        if os.path.join(home, target) not in hidden_dirs
+        if _fold_crew_home_alias(os.path.join(home, target), crew_home_aliases) not in hidden_dirs
     )
     # A relocated data home escapes every ``$HOME``-relative rule above, which would
     # leave the ceiling writable on exactly the managed fleets that set it.
@@ -8255,12 +8361,19 @@ def _build_launcher_script(
             + unhidden
             + [path for path in readonly_dirs if path not in set(runtime_parents)]
             + ([os.path.join(home, ".ssh")] if hide_ssh else []),
-            literal_guards=[os.path.join(home, f) for f in files],
+            literal_guards=[
+                _fold_crew_home_alias(os.path.join(home, f), crew_home_aliases) for f in files
+            ],
             carveable_parents=runtime_parents,
         )
     )
     files_json = json.dumps(
-        list(dict.fromkeys([os.path.join(home, f) for f in files] + hidden_dirs))
+        list(
+            dict.fromkeys(
+                [_fold_crew_home_alias(os.path.join(home, f), crew_home_aliases) for f in files]
+                + hidden_dirs
+            )
+        )
     )
     # The subset of SENSITIVE_FILES whose ABSENCE at mask time is a fault rather than "nothing
     # to hide". Every other entry is skipped when absent on purpose -- an unused store is left
@@ -8270,8 +8383,16 @@ def _build_launcher_script(
     # instead. The link count is required too: a legitimate alias has more than one name by
     # construction, so a single-linked file at the same path is something else that appeared
     # there, and masking it would report a hole closed while the credential moved.
-    fail_closed_json = json.dumps([list(entry) for entry in dict.fromkeys(fail_closed_file_masks)])
-    expose_pairs = [(os.path.join(home, f), f.split("/")[-1]) for f in expose_files]
+    fail_closed_json = json.dumps(
+        [
+            [_fold_crew_home_alias(path, crew_home_aliases), dev, ino]
+            for path, dev, ino in dict.fromkeys(fail_closed_file_masks)
+        ]
+    )
+    expose_pairs = [
+        (_fold_crew_home_alias(os.path.join(home, f), crew_home_aliases), f.split("/")[-1])
+        for f in expose_files
+    ]
     # Caller-supplied read-only re-exposures (absolute paths), same primitive
     # the cc tier uses for ``.aws/config``: pre-read the content, hide the
     # parent, restore a 0444 copy inside the empty mount. A COPY, never the
@@ -8324,10 +8445,14 @@ def _build_launcher_script(
     occupants_json = json.dumps(
         {
             name: [ident[0], ident[1], int(bool(ident[2]))] + [int(k) for k in ident[3:6]]
-            for name, ident in sorted((mask_occupants or {}).items())
+            for name, ident in sorted(
+                (_fold_crew_home_alias(n, crew_home_aliases), i)
+                for n, i in (mask_occupants or {}).items()
+            )
         }
     )
     expose_json = json.dumps(expose_pairs)
+    aliases_json = json.dumps([list(entry) for entry in crew_home_aliases])
     env_prefixes_json = json.dumps(env_prefixes)
     ssh_dir = json.dumps(os.path.join(home, ".ssh"))
     ssh_known_hosts = json.dumps(os.path.join(home, ".ssh", "known_hosts"))
@@ -9042,6 +9167,30 @@ def _pin_mount_path(target, kind, require_present=False):
             "established it saw, so the object it inspected is unmasked at "
             "whatever name it moved to"
         )
+    # A name with no carried expectation whose object is a DIRECTORY stand-in this
+    # launcher already bound is a second spelling of a directory masked under its
+    # first -- a symlinked home lists the data home under ``$HOME`` and under the
+    # resolved path. Binding a fresh stand-in over it would move the name onto a
+    # stand-in the record for the first spelling does not name, and
+    # ``_covered_by_own_mask`` then reads a leaf absent beneath it as a vanished
+    # object. The mask is in place: the name is read back exactly as every hiding
+    # mount's is, recorded as reaching the stand-in, and nothing is mounted. A
+    # stand-in reached at an unvouched name protects nothing more when masked over,
+    # so the skip gives up no cover. The expectation-carrying twin of this branch is
+    # the ``_OWN_STAND_INS`` check above; a name whose pass recorded an occupant
+    # never reaches here with a stand-in, because that check already answered.
+    if expect_occupant is None and not occupant[2] and occupant[:2] in _OWN_STAND_INS:
+        try:
+            _reached_mode = os.fstat(fd).st_mode
+        except OSError as exc:
+            os.close(fd)
+            _refuse("%s" % exc)
+        if (_reached_mode & _S_IFMT) == _S_IFDIR:
+            _reached = occupant[:2]
+            os.close(fd)
+            _verify_masked_name(_t, _reached, os.fsdecode(_t))
+            _MASKED_NAMES[os.fsdecode(_t).rstrip("/")] = _reached
+            return None, None
     return fd, ("/proc/self/fd/%d" % fd).encode()
 
 def _mask_required(name):
@@ -9211,6 +9360,7 @@ FAIL_CLOSED_FILE_MASKS = {fail_closed_json}
 ALIAS_CREDENTIAL_IDS = {alias_credential_ids_json}
 REQUIRED_MASK_TARGETS = frozenset({required_json})
 MASK_OCCUPANTS = {occupants_json}
+CREW_HOME_ALIASES = {aliases_json}
 EXPOSE_FILES = {expose_json}
 ENV_PREFIXES = {env_prefixes_json}
 SSH_DIR = {ssh_dir}
@@ -9316,6 +9466,33 @@ def main():
         # prefix, OUTSIDE the pid-parsed family, so the janitor never races
         # its mkdtemp/rmdir window.
         _src_prefix = "kirocrew_sb_%d_" % os.getpid()
+
+        # A crew-home alias is a ``$HOME`` spelling the producer folded onto the
+        # resolved data home because, when it looked, both reached one directory.
+        # The link that makes them one is a name, so it is read again HERE, before
+        # any mask is placed: an alias that reaches a different directory now would
+        # leave whatever it reaches unmasked under rules that were folded away, and
+        # that spawn is refused rather than run with the alias uncovered. A
+        # ``stat`` that follows the link, as the producer's did -- the question is
+        # which directory the spelling reaches, not what occupies the name.
+        for _alias, _canonical, _alias_dev, _alias_ino in CREW_HOME_ALIASES:
+            try:
+                _alias_st = os.stat(_alias)
+            except OSError as _alias_exc:
+                sys.exit(
+                    "sandbox: BLOCKED -- %s reached the data home %s when this spawn was "
+                    "prepared and cannot be read now (%s), so the rules folded onto the "
+                    "data home may not cover what it reaches. Lower sandbox_level to run "
+                    "without this check deliberately." % (_alias, _canonical, _alias_exc)
+                )
+            if (_alias_st.st_dev, _alias_st.st_ino) != (_alias_dev, _alias_ino):
+                sys.exit(
+                    "sandbox: BLOCKED -- %s reached the data home %s when this spawn was "
+                    "prepared and reaches a different directory now, so the rules folded "
+                    "onto the data home would leave what it reaches unmasked. Another "
+                    "process re-aimed that name. Lower sandbox_level to run without this "
+                    "check deliberately." % (_alias, _canonical)
+                )
 
         # Pre-read files that must survive dir hiding.
         #
@@ -9595,30 +9772,9 @@ def main():
                 # and then mounting on the NAME would let the rename land in between.
                 target = ("/proc/self/fd/%d" % _mask_fd).encode()
             else:
-                # After the pin, an object that is a stand-in THIS launcher already
-                # bound means this name is a second spelling of a directory masked
-                # under its first (a symlinked home lists the data home under both
-                # the ``$HOME`` and the resolved spelling). Binding a fresh stand-in
-                # over it would move the name onto a stand-in the record for the first
-                # spelling does not name, and ``_covered_by_own_mask`` then reads a
-                # leaf absent beneath it as a vanished object and refuses the spawn.
-                # The mask is in place; record this spelling as reaching it and move
-                # on. Only a name without a vouched identity takes this arm, and a
-                # stand-in reached at such a name protects nothing more when masked
-                # again.
                 _mask_fd, target = _pin_mount_path(
                     d.encode(), stat.S_ISDIR, require_present=_mask_required(d))
                 if target is None:
-                    continue
-                _reached_st = os.fstat(_mask_fd)
-                _reached_id = (_reached_st.st_dev, _reached_st.st_ino)
-                if _reached_id in _OWN_STAND_INS:
-                    os.close(_mask_fd)
-                    # The name is read back exactly as every hiding mount's is: the
-                    # skip stands on the name reaching the stand-in NOW, not on the
-                    # descriptor having reached it a moment ago.
-                    _verify_masked_name(d.encode(), _reached_id, d)
-                    _MASKED_NAMES[d.rstrip("/")] = _reached_id
                     continue
             # Held open until the mount is done; every failure in between ends the
             # process, so the descriptor path stays valid for exactly the mount.
@@ -10498,6 +10654,10 @@ def namespace_argv(
         extra_expose_files=extra_expose_files,
         required_mask_targets=tuple(_required_targets),
         mask_occupants=_mask_occupants,
+        # Decided here, beside the passes that already stat the crew roots, so the
+        # builder stays free of filesystem calls and still hands the launcher one
+        # name per crew directory on a symlinked home.
+        crew_home_aliases=_crew_home_alias_roots(),
     )
     run_dir = _ensure_run_dir()
     fd, path = tempfile.mkstemp(

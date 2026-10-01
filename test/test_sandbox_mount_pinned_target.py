@@ -794,7 +794,17 @@ def _pin_namespace_from_builder(
     module.write_text(
         textwrap.dedent(helpers) + "\nREQUIRED_MASK_TARGETS = frozenset()\n" + emitted[0] + "\n"
     )
-    return runpy.run_path(str(module), init_globals={"os": os, "stat": stat, "sys": sys})
+    # The name read-back is sliced out with the loops; the pin calls it on the
+    # second-spelling skip, so a no-op stands in, as the loop harness does.
+    return runpy.run_path(
+        str(module),
+        init_globals={
+            "os": os,
+            "stat": stat,
+            "sys": sys,
+            "_verify_masked_name": lambda name, stand_in, what: None,
+        },
+    )
 
 
 def test_the_builder_forwards_the_referent_kind(tmp_path: Path) -> None:
@@ -1709,16 +1719,6 @@ _BREAK_ARMS = (
         "                _mask_fd, target = _pin_mount_path(\n"
         "                    d.encode(), stat.S_ISDIR, require_present=_mask_required(d))\n"
         "                if target is None:\n"
-        "                    continue\n"
-        "                _reached_st = os.fstat(_mask_fd)\n"
-        "                _reached_id = (_reached_st.st_dev, _reached_st.st_ino)\n"
-        "                if _reached_id in _OWN_STAND_INS:\n"
-        "                    os.close(_mask_fd)\n"
-        "                    # The name is read back exactly as every hiding mount's is: the\n"
-        "                    # skip stands on the name reaching the stand-in NOW, not on the\n"
-        "                    # descriptor having reached it a moment ago.\n"
-        "                    _verify_masked_name(d.encode(), _reached_id, d)\n"
-        '                    _MASKED_NAMES[d.rstrip("/")] = _reached_id\n'
         "                    continue\n",
         "                _mask_fd, target = -1, d.encode()\n"
         "                if not os.path.isdir(target):\n"
