@@ -127,6 +127,47 @@ def diff_commit(repo: str, root: str, sha: str) -> dict:
     }
 
 
+def diff_hunks(repo: str, root: str, path: str, staged: bool = False) -> dict:
+    """Parse a file diff into structured hunks for line-level staging UI.
+
+    Each hunk carries its raw patch text (what `git apply --cached` needs)
+    plus parsed old/new lines for side-by-side rendering.
+    """
+    rp = _resolve_repo(repo, root)
+    args = ["diff", "-U3"]
+    if staged:
+        args.append("--cached")
+    args += ["--", path]
+    raw = _ok(_git(args, rp))
+    hunks: list[dict] = []
+    current_hunk: dict | None = None
+    current_patch: list[str] = []
+    header_lines: list[str] = []
+    for line in raw.split("\n"):
+        if line.startswith("@@"):
+            if current_hunk is not None:
+                current_hunk["patch"] = "\n".join(current_patch)
+                hunks.append(current_hunk)
+            current_hunk = {"header": line, "oldLines": [], "newLines": []}
+            current_patch = [line]
+        elif current_hunk is not None:
+            current_patch.append(line)
+            if line.startswith("-") or line.startswith(" "):
+                current_hunk["oldLines"].append(line[1:] if len(line) > 1 else "")
+            if line.startswith("+") or line.startswith(" "):
+                current_hunk["newLines"].append(line[1:] if len(line) > 1 else "")
+        else:
+            header_lines.append(line)
+    if current_hunk is not None:
+        current_hunk["patch"] = "\n".join(current_patch)
+        hunks.append(current_hunk)
+    return {
+        "repo": repo, "path": path, "staged": staged,
+        "header": "\n".join(header_lines),
+        "hunks": hunks,
+    }
+
+
 # ── Staging ──────────────────────────────────────────────────────────────────
 
 def stage_file(repo: str, root: str, path: str) -> dict:

@@ -554,6 +554,24 @@ async def _gg_diff_file(request: web.Request) -> web.Response:
 
 
 @_guarded
+async def _gg_diff_hunks(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import git_gui
+
+    try:
+        return _json(await asyncio.to_thread(
+            git_gui.diff_hunks,
+            request.query.get("repo", ""), _load_root(),
+            request.query.get("path", ""), request.query.get("staged") == "1",
+        ))
+    except FileNotFoundError:
+        return _json({"error": "not found", "code": "not_found"}, 404)
+    except RuntimeError as exc:
+        return _json({"error": str(exc), "code": "git_error"}, 409)
+
+
+@_guarded
 async def _gg_diff_commit(request: web.Request) -> web.Response:
     import asyncio
 
@@ -586,6 +604,11 @@ async def _gg_stage(request: web.Request) -> web.Response:
             if body.get("unstage"):
                 return _json(await asyncio.to_thread(git_gui.unstage_all, repo, root))
             return _json(await asyncio.to_thread(git_gui.stage_all, repo, root))
+        if op == "hunk":
+            return _json(await asyncio.to_thread(
+                git_gui.stage_hunk, repo, root,
+                body.get("path", ""), body.get("patch", ""), bool(body.get("reverse")),
+            ))
         if op == "commit":
             return _json(await asyncio.to_thread(git_gui.commit, repo, root, body.get("message", ""), bool(body.get("amend"))))
         return _json({"error": f"unknown op {op!r}", "code": "bad_request"}, 400)
@@ -719,6 +742,7 @@ def register_routes(app: web.Application) -> None:
     r.add_get(f"{_BASE}/gitgui/status", _gg_status)
     r.add_get(f"{_BASE}/gitgui/diff/file", _gg_diff_file)
     r.add_get(f"{_BASE}/gitgui/diff/commit", _gg_diff_commit)
+    r.add_get(f"{_BASE}/gitgui/diff/hunks", _gg_diff_hunks)
     r.add_post(f"{_BASE}/gitgui/stage", _gg_stage)
     r.add_get(f"{_BASE}/gitgui/branches", _gg_branches)
     r.add_post(f"{_BASE}/gitgui/branch", _gg_branch_op)
