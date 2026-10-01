@@ -14,6 +14,7 @@
 // which rows left.
 
 import { useCallback, useLayoutEffect, useRef, useState, type MutableRefObject, type RefObject } from 'react'
+import { flushSync } from 'react-dom'
 import { captureAnchorCandsFrom, captureTopAnchorFrom, rowTopFrom } from './anchorGeometry'
 import { heightAnchorStillUsable, shiftCompensationAllowed } from './FollowController'
 import { planHeightRetirement, type HeightIndex } from './HeightIndex'
@@ -887,11 +888,15 @@ export function useShiftCompensation<T>(ctx: {
         // there (and a fair estimate elsewhere -- either beats a full-page
         // lurch). Same-commit pre-paint: rebase the window so mounted rows
         // keep their identity, then advance scrollTop by the block just
-        // inserted above the reader.
-        setWindowRange((r) => ({
-          start: Math.min(itemCount, r.start + net),
-          end: Math.min(itemCount, r.end + net),
-        }))
+        // inserted above the reader. flushSync ensures the rebase re-render
+        // commits before the scrollTop write reads layout (React 19 defers
+        // setState from layout effects, breaking the same-commit guarantee).
+        flushSync(() => {
+          setWindowRange((r) => ({
+            start: Math.min(itemCount, r.start + net),
+            end: Math.min(itemCount, r.end + net),
+          }))
+        })
         let insertedPx = 0
         for (let i = 0; i < net; i++) insertedPx += offsetIndex.getHeight(i)
         // Reading scrollTop forces layout, which is also when native scroll
@@ -912,8 +917,15 @@ export function useShiftCompensation<T>(ctx: {
     rebaseScheduledRef.current = true
     // Signed: the anchored row's displacement, so the re-based range contains it
     // whichever way it moved. Clamped to the list on both ends.
+    // React 19: the chained commit (window rebase → stage promotion → consume
+    // effect → scrollTop write) doesn't complete within a single act() cycle
+    // because setState from a layout effect is deferred. flushSync forces the
+    // rebase re-render to commit synchronously so the consume effect's
+    // scrollTop write lands in the same pre-paint window.
     const clamp = (i: number) => Math.max(0, Math.min(itemCount, i))
-    setWindowRange((r) => ({ start: clamp(r.start + shift), end: clamp(r.end + shift) }))
+    flushSync(() => {
+      setWindowRange((r) => ({ start: clamp(r.start + shift), end: clamp(r.end + shift) }))
+    })
     // itemCount is the ONLY trigger by design: offsetIndex re-syncs in the
     // same render that changes itemCount (its memo keys on it), and the
     // scroller/write helpers are stable -- re-running on their identity
