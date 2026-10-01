@@ -412,6 +412,74 @@ async def _dbx_ai(request: web.Request) -> web.Response:
     return _json(payload)
 
 
+# ── 嵌入式工具页 ──
+
+@_guarded
+async def _et_list(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import embedded_tools as et
+
+    return _json(await asyncio.to_thread(et.list_tools))
+
+
+@_guarded
+async def _et_add(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import embedded_tools as et
+
+    body = await request.json() if request.can_read_body else {}
+    try:
+        return _json(
+            await asyncio.to_thread(
+                et.add_tool,
+                body.get("name", ""), body.get("url", ""), body.get("category", "dev"),
+                body.get("description", ""), body.get("launchCommand", ""),
+            )
+        )
+    except ValueError as exc:
+        return _json({"error": str(exc), "code": "bad_request"}, 400)
+
+
+@_guarded
+async def _et_remove(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import embedded_tools as et
+
+    try:
+        return _json(await asyncio.to_thread(et.remove_tool, request.match_info["tool_id"]))
+    except KeyError:
+        return _json({"error": "no such tool", "code": "not_found"}, 404)
+
+
+@_guarded
+async def _et_check(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import embedded_tools as et
+
+    url = request.query.get("url", "")
+    return _json(await asyncio.to_thread(et.check_url, url))
+
+
+@_guarded
+async def _et_launch(request: web.Request) -> web.Response:
+    import asyncio
+
+    from . import embedded_tools as et
+
+    try:
+        return _json(await asyncio.to_thread(et.launch_tool, request.match_info["tool_id"]))
+    except KeyError:
+        return _json({"error": "no such tool", "code": "not_found"}, 404)
+    except PermissionError as exc:
+        return _json({"error": str(exc), "code": "no_launch"}, 409)
+    except Exception as exc:
+        return _json({"error": str(exc), "code": "launch_failed"}, 500)
+
+
 def register_routes(app: web.Application) -> None:
     """Register on the gateway's aiohttp Application (single-arg convention)."""
     r = app.router
@@ -438,3 +506,9 @@ def register_routes(app: web.Application) -> None:
     r.add_post(f"{_BASE}/dbx/query", _dbx_query)
     r.add_post(f"{_BASE}/dbx/register-mcp", _dbx_register_mcp)
     r.add_post(f"{_BASE}/dbx/ai", _dbx_ai)
+    # 嵌入式工具页
+    r.add_get(f"{_BASE}/tools", _et_list)
+    r.add_post(f"{_BASE}/tools", _et_add)
+    r.add_post(f"{_BASE}/tools/{{tool_id}}/remove", _et_remove)
+    r.add_get(f"{_BASE}/tools/check", _et_check)
+    r.add_post(f"{_BASE}/tools/{{tool_id}}/launch", _et_launch)

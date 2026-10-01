@@ -21,6 +21,11 @@
         "route": "/praxis-insight",
         "label": "Praxis Insight",
         "icon": "Layers"
+      },
+      {
+        "route": "/embedded-tools",
+        "label": "Dev Tools",
+        "icon": "Wrench"
       }
     ]
   },

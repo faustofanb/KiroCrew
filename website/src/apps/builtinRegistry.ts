@@ -69,6 +69,7 @@ export const BUILTIN_COMPONENT_REGISTRY: Record<string, BuiltinAppEntry> = {
   '/spec-builder': { component: lazy(() => import('./spec-builder/SpecBuilderPage')), appId: 'spec-builder' },
   '/personal-shopper': { component: lazy(() => import('./personal-shopper/PersonalShopperPage')), appId: 'personal-shopper' },
   '/praxis-insight': { component: lazy(() => import('./praxis-insight/PraxisInsightPage')), appId: 'praxis-insight' },
+  '/embedded-tools': { component: lazy(() => import('./praxis-insight/EmbeddedToolsPage')), appId: 'praxis-insight' },
   '/design-tweak': { component: lazy(() => import('./design-tweak/DesignTweakPage')), appId: 'design-tweak' },
   '/project-scaffolder': { component: lazy(() => import('./project-scaffolder/ProjectScaffolderPage')), appId: 'project-scaffolder' },
 }
