@@ -125,6 +125,64 @@ boundaries. It includes resident runtime workers such as
 parent-policy decision. Adding one requires routing it through the helper and adding it
 to that inventory, so a later spawn cannot silently return to the user-site-dependent
 behavior.
+
+## TLS trust bootstrap across an in-app restart
+
+`kiro_crew._ssl_compat._ensure_ssl_certs` runs in the startup prelude of every entry
+point (`__main__`, `cli`, `mcp_gateway.gatewayd`) before any HTTPS client caches an
+SSL context. Its order is the clean-start order: an operator's `SSL_CERT_FILE` wins
+outright (one warning when the file it names cannot be found, nothing else touched);
+Windows exports nothing (`rustls-native-certs` in the kiro-cli child treats
+`SSL_CERT_FILE` as a replacement for the platform store, so a public-roots bundle
+would subtract every private CA); macOS injects Security.framework evaluation for
+this process; then the interpreter's own default cafile (nothing to export), then the
+Linux distribution bundles in `_CA_CANDIDATES`, then certifi's bundle. The found
+bundle is exported as `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` for the children that
+cannot inherit a process-local injection (kiro-cli, Node MCP servers).
+
+The certifi export is **install-pinned**: `certifi.where()` is
+`<prefix>/lib/pythonX.Y/site-packages/certifi/cacert.pem` inside the running install,
+and an upgrade prunes that tree. The in-app restart successors inherit the
+environment they were exec'd from (`os.execve` in `_process_group_supervisor`,
+`os.execv` in `_spawn_exec_shim`), so a successor re-enters the prelude holding its
+predecessor's value. Honoured as an operator override, that value keeps the successor
+pointing at the previous install's bundle; once the upgrade prunes that tree every TLS
+handshake fails until a restart from a clean environment (#15713).
+
+The rule is the one `LLAMA_CPP_LIB_PATH` follows (`embeddings._is_bundled_libs_dir` /
+`operator_lib_path_override`, #15607): **a value the runtime exported is its own
+transitional value, not an operator's, however it is inherited.** Here the export must
+stay in the environment — the children need it — so the runtime publishes its
+provenance beside it: `KIROCREW_EXPORTED_CA_BUNDLE` holds the bundle path
+`_export_ca_bundle` wrote. `_is_runtime_export` is the one classifier, and it answers
+yes in exactly two cases: the value equals that provenance (a successor inherits both
+together; an operator sets `SSL_CERT_FILE` alone, so theirs never matches), or the value
+is install-shaped (`_is_install_pinned_bundle`: the path ends in
+`site-packages/certifi/cacert.pem` with a parent in front) **and the file is gone** —
+nobody's working policy points at a missing file, and such a pointer is what a
+predecessor from before the provenance existed leaves behind; that is the bridge across
+the upgrade onto this rule. Shape alone, while the file exists, is deliberately not
+enough: an operator who set `SSL_CERT_FILE` to a certifi bundle of their own
+(`$(python -m certifi)`, or one they appended a private CA to) holds a working policy,
+and on macOS it is also an exclusion — an explicit bundle bypasses the
+Security.framework injection, so the Keychain's CAs are not trusted — which
+re-deriving would widen past what they chose.
+
+A runtime value in either variable is dropped before the operator check (so a stale
+`REQUESTS_CA_BUNDLE` beside an operator's `SSL_CERT_FILE` does not survive either), the
+inherited provenance is dropped with it, and trust is derived for this install in the
+clean-start order above, so a successor behaves exactly as a fresh start on the same
+host would: the system bundle wins where there is one, the same install re-exports the
+same path with nothing logged, and both entry points running the prelude in one process
+see their own export and keep it silently. One `WARNING` line names each value that
+changed — WARNING rather than the INFO #15607 uses, because this runs in the prelude
+before logging is configured and the last-resort handler drops everything below WARNING.
+Not on Windows: the prelude exports nothing there, so no Kiro Crew process can have left
+a value behind, and whatever is set is an operator's.
+`test/test_ssl_certs.py::TestInheritedInstallPinnedBundle` pins the rule, including the
+two-bootstrap restart with the first run's environment carried into the second against
+a pruned bundle, and the operator's certifi pin on macOS that keeps its exclusion.
+
 ## Confined decision-log append
 
 `platform_log_append.append_line` owns the decision log's filesystem transaction.
