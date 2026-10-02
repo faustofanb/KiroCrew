@@ -5633,6 +5633,70 @@
       "askPlaceholder": "ask the database in natural language…",
       "promptReady": "AI context ready (paste into chat)",
       "copy": "Copy"
+    },
+    "ssh": {
+      "title": "SSH",
+      "tab": {
+        "connections": "Connections",
+        "keys": "Keys",
+        "exec": "Exec",
+        "terminal": "Terminal",
+        "files": "Files"
+      },
+      "policyHint": "key-only auth · no passwords stored · accept-new host keys",
+      "conn": {
+        "add": "Add connection",
+        "empty": "No connections yet — add a host on the right",
+        "test": "Test",
+        "noPassword": "Key auth only: passwords are never stored. Optionally pin an IdentityFile (~/.ssh/id_ed25519).",
+        "field_name": "name (optional)",
+        "field_host": "host *",
+        "field_port": "port",
+        "field_user": "user",
+        "field_identityFile": "IdentityFile"
+      },
+      "keys": {
+        "title": "~/.ssh public keys",
+        "empty": "no *.pub found",
+        "pubOnly": "pub only"
+      },
+      "agent": {
+        "title": "ssh-agent",
+        "running": "running",
+        "notRunning": "not reachable"
+      },
+      "knownHosts": {
+        "title": "known_hosts",
+        "truncated": "(list truncated)"
+      },
+      "exec": {
+        "placeholder": "remote command…",
+        "run": "Run",
+        "empty": "output streams here (30s timeout, bounded)",
+        "history": "History",
+        "noHistory": "no history yet"
+      },
+      "term": {
+        "open": "Open terminal",
+        "close": "Close",
+        "closed": "session closed",
+        "error": "terminal connection failed",
+        "hint": "xterm.js ↔ websocket ↔ ssh -tt",
+        "pickFirst": "Pick a connection to open an interactive terminal"
+      },
+      "files": {
+        "refresh": "refresh",
+        "upload": "Upload",
+        "empty": "empty directory",
+        "name": "name",
+        "size": "size",
+        "mtime": "modified",
+        "owner": "owner",
+        "rename": "rename",
+        "newName": "new name",
+        "rmConfirm": "Delete {{name}}?",
+        "mkdirPlaceholder": "new directory name, Enter…"
+      }
     }
   },
   "autoImprovement": {

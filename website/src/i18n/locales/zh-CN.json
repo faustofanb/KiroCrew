@@ -5633,6 +5633,70 @@
       "askPlaceholder": "用自然语言问数据库…",
       "promptReady": "AI 上下文已就绪（复制到聊天）",
       "copy": "复制"
+    },
+    "ssh": {
+      "title": "SSH",
+      "tab": {
+        "connections": "连接",
+        "keys": "密钥",
+        "exec": "执行",
+        "terminal": "终端",
+        "files": "文件"
+      },
+      "policyHint": "仅密钥认证 · 不存储密码 · host key 首见即记录（accept-new）",
+      "conn": {
+        "add": "添加连接",
+        "empty": "尚无连接——右侧添加一台主机",
+        "test": "测试",
+        "noPassword": "仅支持密钥认证：密码永不被保存。可选指定 IdentityFile（~/.ssh/id_ed25519）。",
+        "field_name": "名称（可选）",
+        "field_host": "主机 host *",
+        "field_port": "端口",
+        "field_user": "用户",
+        "field_identityFile": "IdentityFile"
+      },
+      "keys": {
+        "title": "~/.ssh 公钥",
+        "empty": "未找到 *.pub",
+        "pubOnly": "仅公钥"
+      },
+      "agent": {
+        "title": "ssh-agent",
+        "running": "运行中",
+        "notRunning": "不可用"
+      },
+      "knownHosts": {
+        "title": "known_hosts",
+        "truncated": "（列表过长已截断）"
+      },
+      "exec": {
+        "placeholder": "远程命令…",
+        "run": "执行",
+        "empty": "输出将在此流式显示（30s 超时，输出有界）",
+        "history": "历史",
+        "noHistory": "暂无历史"
+      },
+      "term": {
+        "open": "打开终端",
+        "close": "关闭",
+        "closed": "会话已关闭",
+        "error": "终端连接失败",
+        "hint": "xterm.js ↔ websocket ↔ ssh -tt",
+        "pickFirst": "选择连接后打开交互终端"
+      },
+      "files": {
+        "refresh": "刷新",
+        "upload": "上传",
+        "empty": "空目录",
+        "name": "名称",
+        "size": "大小",
+        "mtime": "修改时间",
+        "owner": "属主",
+        "rename": "重命名",
+        "newName": "新名称",
+        "rmConfirm": "删除 {{name}}？",
+        "mkdirPlaceholder": "新建目录名，回车创建…"
+      }
     }
   },
   "autoImprovement": {
