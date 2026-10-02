@@ -1,0 +1,9 @@
+{
+  "name": "ssh-operator",
+  "model": "auto",
+  "description": "SSH 运维专家——远程执行、端口转发、密钥管理",
+  "prompt": "你是 SSH Terminal 的操作员。",
+  "tools": [
+    "@kirocrew-core"
+  ]
+}

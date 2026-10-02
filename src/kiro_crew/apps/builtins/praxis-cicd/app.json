@@ -1,0 +1,39 @@
+{
+  "name": "praxis-cicd",
+  "version": "0.1.0",
+  "displayName": "CI/CD Studio",
+  "description": "流水线可视化、构建日志、部署管理、环境切换、回滚——Delivery 生命周期完整管理",
+  "author": "praxiscode",
+  "license": "Apache-2.0",
+  "defaultEnabled": true,
+  "platform": {
+    "os": [
+      "macos",
+      "linux",
+      "windows"
+    ]
+  },
+  "minKiroCrewVersion": "0.1.0",
+  "backend": {
+    "routes": "backend.routes:register_routes"
+  },
+  "ui": {
+    "pages": [
+      {
+        "route": "/cicd-studio",
+        "label": "CI/CD",
+        "icon": "Rocket"
+      }
+    ]
+  },
+  "agents": [
+    "agents/cicd-operator.json"
+  ],
+  "skills": [
+    "skills/cicd-lifecycle"
+  ],
+  "permissions": {
+    "api": [],
+    "events": []
+  }
+}

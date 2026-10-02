@@ -1,0 +1,9 @@
+{
+  "name": "cicd-operator",
+  "model": "auto",
+  "description": "CI/CD 操作员——流水线管理、部署编排、环境切换、回滚策略",
+  "prompt": "你是 CI/CD Studio 的操作员。",
+  "tools": [
+    "@kirocrew-core"
+  ]
+}

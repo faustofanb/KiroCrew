@@ -1,0 +1,39 @@
+{
+  "name": "praxis-dbx",
+  "version": "0.1.0",
+  "displayName": "DBX Database",
+  "description": "100+ 数据库客户端完整 Web UI（查询编辑器、数据网格、ER 图、Schema Diff）——从源码编译嵌入，无需 Docker",
+  "author": "praxiscode",
+  "license": "Apache-2.0",
+  "defaultEnabled": true,
+  "platform": {
+    "os": [
+      "macos",
+      "linux",
+      "windows"
+    ]
+  },
+  "minKiroCrewVersion": "0.1.0",
+  "backend": {
+    "routes": "backend.routes:register_routes"
+  },
+  "ui": {
+    "pages": [
+      {
+        "route": "/dbx",
+        "label": "DBX",
+        "icon": "Database"
+      }
+    ]
+  },
+  "agents": [
+    "agents/dbx-analyst.json"
+  ],
+  "skills": [
+    "skills/dbx-database"
+  ],
+  "permissions": {
+    "api": [],
+    "events": []
+  }
+}

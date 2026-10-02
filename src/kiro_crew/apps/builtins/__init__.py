@@ -18,6 +18,10 @@ BUILTIN_NAMES: list[str] = [
     "personal_shopper",
     "pptx_maker",
     "praxis_insight",
+    "praxis_cicd",
+    "praxis_dbx",
+    "praxis_git",
+    "praxis_ssh",
     "spec_builder",
 ]
 

@@ -1,0 +1,9 @@
+{
+  "name": "dbx-analyst",
+  "model": "auto",
+  "description": "数据库分析师——SQL 生成、Schema 分析、数据迁移",
+  "prompt": "你是 DBX Database 的操作员。",
+  "tools": [
+    "@kirocrew-core"
+  ]
+}

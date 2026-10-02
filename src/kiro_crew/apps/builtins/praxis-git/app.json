@@ -1,0 +1,39 @@
+{
+  "name": "praxis-git",
+  "version": "0.1.0",
+  "displayName": "Git Studio",
+  "description": "完整 Git 客户端：提交历史图、暂存/反暂存、分支管理、diff 查看器、blame、交互式 rebase、stash、cherry-pick——对标 Fork 软件",
+  "author": "praxiscode",
+  "license": "Apache-2.0",
+  "defaultEnabled": true,
+  "platform": {
+    "os": [
+      "macos",
+      "linux",
+      "windows"
+    ]
+  },
+  "minKiroCrewVersion": "0.1.0",
+  "backend": {
+    "routes": "backend.routes:register_routes"
+  },
+  "ui": {
+    "pages": [
+      {
+        "route": "/git-studio",
+        "label": "Git Studio",
+        "icon": "GitBranch"
+      }
+    ]
+  },
+  "agents": [
+    "agents/git-operator.json"
+  ],
+  "skills": [
+    "skills/git-workflow"
+  ],
+  "permissions": {
+    "api": [],
+    "events": []
+  }
+}

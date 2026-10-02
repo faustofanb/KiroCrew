@@ -1,0 +1,39 @@
+{
+  "name": "praxis-ssh",
+  "version": "0.1.0",
+  "displayName": "SSH Terminal",
+  "description": "SSH 连接管理、远程终端、密钥管理、端口转发、文件传输",
+  "author": "praxiscode",
+  "license": "Apache-2.0",
+  "defaultEnabled": true,
+  "platform": {
+    "os": [
+      "macos",
+      "linux",
+      "windows"
+    ]
+  },
+  "minKiroCrewVersion": "0.1.0",
+  "backend": {
+    "routes": "backend.routes:register_routes"
+  },
+  "ui": {
+    "pages": [
+      {
+        "route": "/ssh",
+        "label": "SSH",
+        "icon": "Terminal"
+      }
+    ]
+  },
+  "agents": [
+    "agents/ssh-operator.json"
+  ],
+  "skills": [
+    "skills/ssh-remote"
+  ],
+  "permissions": {
+    "api": [],
+    "events": []
+  }
+}

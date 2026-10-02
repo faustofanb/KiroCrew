@@ -1,0 +1,9 @@
+{
+  "name": "git-operator",
+  "model": "auto",
+  "description": "Git 操作专家——分支管理、合并冲突解决、交互式 rebase、历史回溯",
+  "prompt": "你是 Git Studio 的操作员。",
+  "tools": [
+    "@kirocrew-core"
+  ]
+}
