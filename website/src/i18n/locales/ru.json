@@ -5873,6 +5873,36 @@
         "abortSequencerTitle": "Abort {{op}}",
         "abortSequencerBody": "Abandon the in-progress {{op}} and return to its starting state."
       }
+    },
+    "dbx": {
+      "title": "DBX Database",
+      "start": "Start dbx-web",
+      "stop": "Stop",
+      "restart": "Restart",
+      "reload": "Reload",
+      "logs": "Logs",
+      "logTail": "dbx-web log tail (bounded)",
+      "noLogs": "(no log output yet)",
+      "autoRestart": "auto-restart",
+      "autoRestartHint": "relaunch after a crash, max 3 per minute",
+      "state": {
+        "checking": "checking…",
+        "running": "running",
+        "starting": "starting",
+        "stopped": "stopped",
+        "foreign": "port held by a foreign process"
+      },
+      "stoppedTitle": "dbx-web is not running",
+      "stoppedBody": "Start it to use the full embedded web UI: query editor, data grid, ER diagram, schema diff. Built from source, no Docker; data lives under ~/.local/share/dbx-web.",
+      "setupHint": "dbx-web has no password yet — complete the one-time setup in the UI below (the password belongs to dbx-web).",
+      "connections": "Connections",
+      "connectionsReadOnly": "read-only projection · credentials never shown",
+      "loadingConnections": "loading connections…",
+      "noConnections": "no connections yet — add one in the dbx-web UI",
+      "ask": "Ask",
+      "askPlaceholder": "ask the database in natural language…",
+      "promptReady": "AI context ready (paste into chat)",
+      "copy": "Copy"
     }
   },
   "autoImprovement": {

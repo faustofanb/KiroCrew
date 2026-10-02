@@ -5603,6 +5603,36 @@
         "abortSequencerTitle": "中止 {{op}}",
         "abortSequencerBody": "放弃进行中的 {{op}}，回到开始前的状态。"
       }
+    },
+    "dbx": {
+      "title": "DBX 数据库",
+      "start": "启动 dbx-web",
+      "stop": "停止",
+      "restart": "重启",
+      "reload": "刷新",
+      "logs": "日志",
+      "logTail": "dbx-web 日志（有界尾部）",
+      "noLogs": "（暂无日志输出）",
+      "autoRestart": "崩溃自动重启",
+      "autoRestartHint": "进程崩溃后自动重新拉起（每分钟最多 3 次，超过则保持停止）",
+      "state": {
+        "checking": "检测中…",
+        "running": "运行中",
+        "starting": "启动中",
+        "stopped": "已停止",
+        "foreign": "端口被外部进程占用"
+      },
+      "stoppedTitle": "dbx-web 未运行",
+      "stoppedBody": "启动后可在内嵌的完整 Web UI 中使用查询编辑器、数据网格、ER 图与 Schema Diff。源码编译、无 Docker；数据目录 ~/.local/share/dbx-web。",
+      "setupHint": "dbx-web 尚未设置访问密码——在下方界面完成一次初始设置即可（密码只属于 dbx-web）。",
+      "connections": "连接",
+      "connectionsReadOnly": "只读投影 · 凭据不可见",
+      "loadingConnections": "读取连接清单…",
+      "noConnections": "暂无连接——在 dbx-web 界面中添加",
+      "ask": "生成",
+      "askPlaceholder": "用自然语言问数据库…",
+      "promptReady": "AI 上下文已就绪（复制到聊天）",
+      "copy": "复制"
     }
   },
   "autoImprovement": {
