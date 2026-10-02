@@ -5697,6 +5697,37 @@
         "rmConfirm": "删除 {{name}}？",
         "mkdirPlaceholder": "新建目录名，回车创建…"
       }
+    },
+    "cicd": {
+      "title": "CI/CD Studio",
+      "simulated": "模拟数据",
+      "loading": "加载中…",
+      "noTestEvidence": "无真实 TEST 证据",
+      "evidenceChain": "Evidence 溯源链（6 级来源）",
+      "hardGates": "硬门禁",
+      "divergence": "规格/实现分歧",
+      "atomicNote": "ChangeSet 是跨仓库的原子变更单元：一次要么全部落地，要么全部不落地。",
+      "adapterSeam": "DeploymentAdapter 接缝",
+      "restartTimeline": "失败 / 重启时间线重构",
+      "noFailures": "当前无 UNKNOWN / 恢复中的运行",
+      "promoteTest": "推进 TEST 资格",
+      "promoteProd": "推进 PROD（受门禁）",
+      "close": "关闭交付",
+      "topologyUnavailable": "拓扑图渲染失败",
+      "unknownNote": "UNKNOWN 是独立的生命周期状态：观测缺口等待对账，绝不渲染为失败色。",
+      "tab": {
+        "lifecycle": "交付生命周期",
+        "changesets": "变更集",
+        "adapter": "适配器接缝",
+        "vocab": "词表"
+      },
+      "vocab": {
+        "title": "13 词生命周期词表",
+        "evidence": "Evidence 来源级别",
+        "works": "Work 状态总览"
+      },
+      "notFailed": "≠ FAILED",
+      "unknownCount": "UNKNOWN ×{{n}}"
     }
   },
   "autoImprovement": {

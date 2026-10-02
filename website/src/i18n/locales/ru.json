@@ -5967,6 +5967,37 @@
         "rmConfirm": "Delete {{name}}?",
         "mkdirPlaceholder": "new directory name, Enter…"
       }
+    },
+    "cicd": {
+      "title": "CI/CD Studio",
+      "simulated": "simulated data",
+      "loading": "loading…",
+      "noTestEvidence": "no real TEST evidence",
+      "evidenceChain": "Evidence provenance chain (6 levels)",
+      "hardGates": "Hard gates",
+      "divergence": "spec/implementation divergence",
+      "atomicNote": "A ChangeSet is the cross-repository atomic unit: all repos land or none do.",
+      "adapterSeam": "DeploymentAdapter seam",
+      "restartTimeline": "failure / restart timeline reconstruction",
+      "noFailures": "no UNKNOWN / recovering runs right now",
+      "promoteTest": "promote TEST",
+      "promoteProd": "promote PROD (gated)",
+      "close": "close delivery",
+      "topologyUnavailable": "topology render failed",
+      "unknownNote": "UNKNOWN is its own lifecycle state: an observation gap awaiting reconciliation — never rendered as failure.",
+      "tab": {
+        "lifecycle": "Delivery lifecycle",
+        "changesets": "ChangeSets",
+        "adapter": "Adapter seam",
+        "vocab": "Vocabulary"
+      },
+      "vocab": {
+        "title": "13-word lifecycle vocabulary",
+        "evidence": "Evidence provenance levels",
+        "works": "Work status overview"
+      },
+      "notFailed": "≠ FAILED",
+      "unknownCount": "UNKNOWN ×{{n}}"
     }
   },
   "autoImprovement": {
