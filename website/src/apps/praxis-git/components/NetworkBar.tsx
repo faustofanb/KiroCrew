@@ -10,6 +10,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowDownToLine, ArrowUpFromLine, CloudDownload, Loader2, X } from 'lucide-react'
 import { api, streamNetworkOp } from '../api'
 import { i18nT } from '../../../i18n/t'
+import { Btn, Checkbox } from '../../../components/ui'
+import { Progress } from '../../../components/ui/progress'
 import type { NetworkEvent } from '../types'
 
 const LOG_CAP = 300
@@ -105,9 +107,10 @@ export function NetworkBar(props: {
     }
   }
 
-  const btn = (kind: 'fetch' | 'pull' | 'push', icon: React.ReactNode, label: string, tone: string, testId: string) => (
-    <button
-      className={`inline-flex items-center gap-1 rounded px-2.5 py-1 text-[11px] disabled:opacity-40 ${tone}`}
+  const btn = (kind: 'fetch' | 'pull' | 'push', icon: React.ReactNode, label: string, primary = false, testId: string) => (
+    <Btn
+      primary={primary}
+      className="px-2.5 py-0.5 text-[11px]"
       disabled={!!running}
       onClick={() => start(kind)}
       data-testid={testId}
@@ -115,22 +118,22 @@ export function NetworkBar(props: {
     >
       {icon}
       {label}
-    </button>
+    </Btn>
   )
 
   return (
     <div className="shrink-0 border-b border-border bg-card px-3 py-1.5" data-testid="network-bar">
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-[10px] text-muted">{props.defaultRemote}</span>
-        {btn('fetch', <CloudDownload size={11} />, i18nT('apps.gitStudio.network.fetch'), 'border border-border text-text hover:bg-bg-hover', 'net-fetch')}
-        {btn('pull', <ArrowDownToLine size={11} />, i18nT('apps.gitStudio.network.pull'), 'border border-border text-text hover:bg-bg-hover', 'net-pull')}
-        {btn('push', <ArrowUpFromLine size={11} />, i18nT('apps.gitStudio.network.push'), 'border border-accent bg-accent text-accent-fg hover:opacity-90', 'net-push')}
+        {btn('fetch', <CloudDownload size={11} />, i18nT('apps.gitStudio.network.fetch'), false, 'net-fetch')}
+        {btn('pull', <ArrowDownToLine size={11} />, i18nT('apps.gitStudio.network.pull'), false, 'net-pull')}
+        {btn('push', <ArrowUpFromLine size={11} />, i18nT('apps.gitStudio.network.push'), true, 'net-push')}
         <label className="flex items-center gap-1 text-[9.5px] text-muted" title={i18nT('apps.gitStudio.network.forceHint')}>
-          <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} className="h-3 w-3" data-testid="net-force" />
+          <Checkbox checked={force} onChange={(e) => setForce(e.target.checked)} data-testid="net-force" />
           {i18nT('apps.gitStudio.network.force')}
         </label>
         <label className="flex items-center gap-1 text-[9.5px] text-muted">
-          <input type="checkbox" checked={ffOnly} onChange={(e) => setFfOnly(e.target.checked)} className="h-3 w-3" />
+          <Checkbox checked={ffOnly} onChange={(e) => setFfOnly(e.target.checked)} />
           {i18nT('apps.gitStudio.network.ffOnly')}
         </label>
         {running && (
@@ -140,8 +143,8 @@ export function NetworkBar(props: {
             ) : (
               <span className={`shrink-0 font-mono text-[10px] ${running.exitCode === 0 ? 'text-ok' : 'text-danger'}`}>exit {running.exitCode}</span>
             )}
-            <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded bg-bg-hover">
-              <div className="h-full rounded bg-accent transition-all" style={{ width: `${running.pct}%` }} />
+            <div className="min-w-0 flex-1">
+              <Progress value={running.pct} className="h-1.5" />
             </div>
             <span className="shrink-0 truncate text-[9.5px] text-muted">
               {running.kind} {running.phase} {running.pct}%

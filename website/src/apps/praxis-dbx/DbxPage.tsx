@@ -20,6 +20,8 @@ import {
   Terminal,
 } from 'lucide-react'
 import { i18nT } from '../../i18n/t'
+import { Badge, Btn, Card, EmptyState, Toggle } from '../../components/ui'
+import ErrorNotice from '../../components/ErrorNotice'
 
 const BASE = '/api/apps/praxis-dbx'
 const PROXY = '/dbx-app/'
@@ -174,11 +176,6 @@ export default function DbxPage() {
         : status?.state === 'foreign'
           ? i18nT('apps.dbx.state.foreign')
           : i18nT('apps.dbx.state.stopped')
-  const stateTone = status?.up
-    ? 'bg-ok-subtle text-ok'
-    : status?.state === 'starting'
-      ? 'bg-warn-subtle text-warn'
-      : 'bg-danger-subtle text-danger'
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -186,57 +183,51 @@ export default function DbxPage() {
       <div className="flex h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-card px-3">
         <Database size={14} className="shrink-0 text-accent" />
         <span className="text-[14px] font-semibold text-text-strong">{i18nT('apps.dbx.title')}</span>
-        <span className={`rounded px-1.5 py-0.5 text-[10px] ${stateTone}`} data-testid="dbx-state">
+        <Badge variant={ensuring ? 'warn' : status?.up ? 'ok' : status?.state === 'starting' ? 'warn' : 'err'} data-testid="dbx-state">
           {stateLabel}
-        </span>
-        {status?.pid && <span className="font-mono text-[10px] text-muted">pid {status.pid}</span>}
-        {status?.version && <span className="font-mono text-[10px] text-muted">v{status.version}</span>}
-        <span className="font-mono text-[10px] text-muted">:{status?.port ?? 4224}</span>
-        <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted" title={i18nT('apps.dbx.autoRestartHint')}>
-          <input type="checkbox" checked={status?.autoRestart ?? false} onChange={toggleAuto} className="h-3 w-3" data-testid="dbx-auto-restart" />
-          {i18nT('apps.dbx.autoRestart')}
-        </label>
+        </Badge>
+        {status?.pid && <Badge variant="muted">pid {status.pid}</Badge>}
+        {status?.version && <Badge variant="muted">v{status.version}</Badge>}
+        <Badge variant="muted">:{status?.port ?? 4224}</Badge>
+        <Toggle checked={status?.autoRestart ?? false} onChange={toggleAuto} label={i18nT('apps.dbx.autoRestart')} tone="muted" data-testid="dbx-auto-restart" />
         <div className="ml-auto flex shrink-0 gap-1.5">
           {running ? (
             <>
-              <button className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted hover:bg-bg-hover" disabled={!!busy} onClick={() => setIframeKey((k) => k + 1)}>
+              <Btn className="py-0.5 text-[11px]" disabled={!!busy} onClick={() => setIframeKey((k) => k + 1)}>
                 <RefreshCw size={11} />
                 {i18nT('apps.dbx.reload')}
-              </button>
-              <button className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted hover:bg-bg-hover" disabled={!!busy} onClick={showLogs} data-testid="dbx-logs">
+              </Btn>
+              <Btn className="py-0.5 text-[11px]" disabled={!!busy} onClick={showLogs} data-testid="dbx-logs">
                 {busy === 'logs' ? <Loader2 size={11} className="animate-spin" /> : <ScrollText size={11} />}
                 {i18nT('apps.dbx.logs')}
-              </button>
-              <button
-                className="inline-flex items-center gap-1 rounded border border-danger px-2 py-1 text-[11px] text-danger hover:bg-danger-subtle"
-                disabled={!!busy}
-                onClick={() => op('restart', async () => void j(await fetch(`${BASE}/restart`, { method: 'POST' })))}
-              >
+              </Btn>
+              <Btn danger className="py-0.5 text-[11px]" disabled={!!busy} onClick={() => op('restart', async () => void j(await fetch(`${BASE}/restart`, { method: 'POST' })))}>
                 {busy === 'restart' ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
                 {i18nT('apps.dbx.restart')}
-              </button>
-              <button className="inline-flex items-center gap-1 rounded border border-danger px-2 py-1 text-[11px] text-danger hover:bg-danger-subtle" disabled={!!busy} onClick={stop} data-testid="dbx-stop">
+              </Btn>
+              <Btn danger className="py-0.5 text-[11px]" disabled={!!busy} onClick={stop} data-testid="dbx-stop">
                 <Square size={11} />
                 {i18nT('apps.dbx.stop')}
-              </button>
+              </Btn>
             </>
           ) : (
-            <button
-              className="inline-flex items-center gap-1 rounded bg-accent px-3 py-1 text-[12px] text-accent-fg hover:opacity-90 disabled:opacity-40"
+            <Btn
+              primary
+              className="py-0.5 text-[12px]"
               disabled={!!busy || ensuring || status?.binaryPresent === false}
               onClick={start}
               data-testid="dbx-start"
             >
               {busy || ensuring ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
               {ensuring ? i18nT('apps.dbx.state.checking') : i18nT('apps.dbx.start')}
-            </button>
+            </Btn>
           )}
         </div>
       </div>
 
       {error && (
-        <div className="mx-3 mt-2 rounded border border-danger bg-danger-subtle px-3 py-2 text-[12px] text-danger" data-testid="dbx-error">
-          {error}
+        <div className="mx-3 mt-2" data-testid="dbx-error">
+          <ErrorNotice message={error} onDismiss={() => setError(null)} />
         </div>
       )}
 
@@ -258,22 +249,23 @@ export default function DbxPage() {
         </div>
       ) : (
         <div className="flex flex-1 items-center justify-center p-6">
-          <div className="max-w-lg rounded-lg border border-border bg-card p-6 text-center">
+          <Card className="max-w-lg p-6 text-center">
             <Database size={28} className="mx-auto text-muted" />
             <p className="mt-3 text-[15px] font-medium text-text-strong">{i18nT('apps.dbx.stoppedTitle')}</p>
             <p className="mt-2 text-[12.5px] leading-6 text-muted">{i18nT('apps.dbx.stoppedBody')}</p>
             <p className="mt-3 font-mono text-[10px] text-muted/70">
               {status?.binary ?? ''} · {status?.dataDir ?? ''}
             </p>
-            <button
-              className="mx-auto mt-4 inline-flex items-center gap-1.5 rounded-lg bg-accent px-6 py-2 text-[13px] text-accent-fg hover:opacity-90 disabled:opacity-40"
+            <Btn
+              primary
+              className="mx-auto mt-4 px-6 py-2 text-[13px]"
               disabled={!!busy || ensuring}
               onClick={start}
             >
               {busy || ensuring ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
               {i18nT('apps.dbx.start')}
-            </button>
-          </div>
+            </Btn>
+          </Card>
         </div>
       )}
 
@@ -294,13 +286,13 @@ export default function DbxPage() {
                 className="h-6 w-64 rounded border border-border bg-bg px-2 text-[10.5px] text-text outline-none focus:border-accent"
                 data-testid="dbx-ask"
               />
-              <button
-                className="rounded border border-aim px-1.5 py-0.5 text-[10px] text-aim hover:bg-bg-hover disabled:opacity-40"
+              <Btn
+                className="px-1.5 py-0 text-[10px]"
                 disabled={busy === 'ai' || !question.trim()}
                 onClick={() => void askAi()}
               >
                 {busy === 'ai' ? <Loader2 size={10} className="animate-spin" /> : i18nT('apps.dbx.ask')}
-              </button>
+              </Btn>
             </div>
           </div>
           {prompt && (
@@ -308,20 +300,25 @@ export default function DbxPage() {
               <div className="mb-1 flex items-center gap-1 text-[10px] font-semibold text-aim">
                 <Terminal size={10} />
                 {i18nT('apps.dbx.promptReady')}
-                <button className="ml-auto rounded border border-border px-1.5 text-[9px] text-muted hover:bg-bg-hover" onClick={() => void navigator.clipboard?.writeText(prompt)}>
+                <Btn className="ml-auto px-1.5 py-0 text-[9px]" onClick={() => void navigator.clipboard?.writeText(prompt)}>
                   {i18nT('apps.dbx.copy')}
-                </button>
-                <button className="rounded border border-border px-1.5 text-[9px] text-muted hover:bg-bg-hover" onClick={() => setPrompt(null)}>
+                </Btn>
+                <Btn className="px-1.5 py-0 text-[9px]" onClick={() => setPrompt(null)}>
                   ×
-                </button>
+                </Btn>
               </div>
               <pre className="max-h-24 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[9.5px] leading-4 text-text">{prompt}</pre>
             </div>
           )}
           {conns === null ? (
-            <div className="py-1.5 text-[10.5px] text-muted">{i18nT('apps.dbx.loadingConnections')}</div>
+            <div className="flex items-center gap-1.5 py-1.5 text-[10.5px] text-muted">
+              <Loader2 size={10} className="animate-spin" />
+              {i18nT('apps.dbx.loadingConnections')}
+            </div>
           ) : conns.length === 0 ? (
-            <div className="py-1.5 text-[10.5px] text-muted">{i18nT('apps.dbx.noConnections')}</div>
+            <div className="py-1">
+              <EmptyState icon={<Database size={18} />} title={i18nT('apps.dbx.noConnections')} testId="dbx-no-connections" />
+            </div>
           ) : (
             <div className="flex flex-wrap gap-1.5">
               {conns.map((c, i) => (
@@ -344,16 +341,16 @@ export default function DbxPage() {
 
       {/* logs drawer */}
       {logs !== null && (
-        <div className="fixed inset-x-4 bottom-4 z-40 rounded-lg border border-border bg-card p-3 shadow-xl" data-testid="dbx-log-panel">
+        <Card className="fixed inset-x-4 bottom-4 z-40 p-3 shadow-xl" data-testid="dbx-log-panel">
           <div className="mb-1 flex items-center gap-2 text-[11px] font-semibold text-text-strong">
             <ScrollText size={12} className="text-muted" />
             {i18nT('apps.dbx.logTail')}
-            <button className="ml-auto rounded border border-border px-1.5 text-[10px] font-normal text-muted hover:bg-bg-hover" onClick={() => setLogs(null)}>
+            <Btn className="ml-auto px-1.5 py-0 text-[10px]" onClick={() => setLogs(null)}>
               ×
-            </button>
+            </Btn>
           </div>
           <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[9.5px] leading-4 text-muted">{logs || i18nT('apps.dbx.noLogs')}</pre>
-        </div>
+        </Card>
       )}
     </div>
   )

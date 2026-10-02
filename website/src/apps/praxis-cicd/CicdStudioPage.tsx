@@ -14,6 +14,9 @@ import * as d3 from 'd3'
 import mermaid from 'mermaid'
 import { AlertTriangle, BadgeCheck, GitBranch, HelpCircle, Rocket, ShieldAlert, Workflow } from 'lucide-react'
 import { i18nT } from '../../i18n/t'
+import { Badge, Btn, Card } from '../../components/ui'
+import SegmentedControl from '../../components/SegmentedControl'
+import ErrorNotice from '../../components/ErrorNotice'
 
 const BASE = '/api/apps/praxis-cicd'
 
@@ -63,21 +66,21 @@ async function j<T>(resp: Response): Promise<T> {
 }
 
 /** The domain rule, expressed in the only place it can't drift: the renderer. */
-function statusTone(s: string): string {
-  if (s === 'UNKNOWN') return 'border-border bg-bg-hover text-muted'
-  if (s === 'ACCEPTED' || s === 'DELIVERED') return 'border-ok bg-ok-subtle text-ok'
-  if (s === 'TEST_QUALIFIED') return 'border-accent bg-accent-subtle text-accent'
-  if (s === 'FAILED') return 'border-danger bg-danger-subtle text-danger'
-  if (s === 'BLOCKED' || s === 'RECOVERY_REQUIRED') return 'border-warn bg-warn-subtle text-warn'
-  return 'border-border bg-bg-hover text-text'
+function statusVariant(s: string): 'ok' | 'err' | 'warn' | 'aim' | 'muted' {
+  if (s === 'UNKNOWN') return 'muted' // its own state — never a failure color
+  if (s === 'ACCEPTED' || s === 'DELIVERED') return 'ok'
+  if (s === 'TEST_QUALIFIED') return 'aim'
+  if (s === 'FAILED') return 'err'
+  if (s === 'BLOCKED' || s === 'RECOVERY_REQUIRED') return 'warn'
+  return 'muted'
 }
 
 function SimStamp() {
   return (
-    <span className="inline-flex shrink-0 items-center gap-1 rounded border border-warn bg-warn-subtle px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-warn" data-testid="sim-stamp">
+    <Badge variant="warn" className="uppercase tracking-wide" data-testid="sim-stamp">
       <HelpCircle size={9} />
       {i18nT('apps.cicd.simulated')}
-    </span>
+    </Badge>
   )
 }
 
@@ -240,7 +243,12 @@ export default function CicdStudioPage() {
 
   const unknownCount = useMemo(() => pipe?.works.filter((w) => w.status === 'UNKNOWN').length ?? 0, [pipe])
 
-  if (error && !pipe) return <div className="m-4 rounded border border-danger bg-danger-subtle p-3 text-[12px] text-danger">{error}</div>
+  if (error && !pipe)
+    return (
+      <div className="m-4">
+        <ErrorNotice message={error} />
+      </div>
+    )
   if (!pipe) return <div className="p-6 text-center text-[12px] text-muted">{i18nT('apps.cicd.loading')}</div>
 
   const tabs: { id: Tab; label: string }[] = [
@@ -252,19 +260,15 @@ export default function CicdStudioPage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-10 shrink-0 flex-wrap items-center gap-1 border-b border-border bg-card px-3">
+      <div className="flex h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-card px-3">
         <Workflow size={13} className="text-accent" />
-        <span className="mr-2 text-[14px] font-semibold text-text-strong">{i18nT('apps.cicd.title')}</span>
-        {tabs.map((t) => (
-          <button key={t.id} className={`rounded px-2.5 py-1 text-[11.5px] ${tab === t.id ? 'bg-accent-subtle font-semibold text-accent' : 'text-muted hover:bg-bg-hover'}`} onClick={() => setTab(t.id)} data-testid={`cicd-tab-${t.id}`}>
-            {t.label}
-          </button>
-        ))}
+        <span className="mr-1 text-[14px] font-semibold text-text-strong">{i18nT('apps.cicd.title')}</span>
+        <SegmentedControl segments={tabs.map((t) => ({ key: t.id, label: t.label }))} value={tab} onChange={(t) => setTab(t as Tab)} layoutId="cicd-tabs" ariaLabel={i18nT('apps.cicd.title')} />
         <SimStamp />
         {unknownCount > 0 && (
-          <span className="rounded border border-border bg-bg-hover px-1.5 text-[9.5px] text-muted" title={i18nT('apps.cicd.unknownNote')}>
+          <Badge variant="muted" title={i18nT('apps.cicd.unknownNote')}>
             {i18nT('apps.cicd.unknownCount', { n: String(unknownCount) })}
-          </span>
+          </Badge>
         )}
         {error && <span className="truncate text-[10px] text-danger">{error}</span>}
       </div>
@@ -276,7 +280,7 @@ export default function CicdStudioPage() {
               {pipe.deliveries.map((d) => (
                 <button
                   key={d.id}
-                  className={`rounded border px-2 py-1 font-mono text-[11px] ${deliveryId === d.id ? 'border-accent bg-accent-subtle text-accent' : 'border-border text-text hover:bg-bg-hover'}`}
+                  className={`rounded-md border px-2 py-1 font-mono text-[11px] ${deliveryId === d.id ? 'border-accent bg-accent-subtle text-accent' : 'border-border text-text hover:bg-bg-hover'}`}
                   onClick={() => setDeliveryId(d.id)}
                   data-testid={`cicd-delivery-${d.id}`}
                 >
@@ -286,7 +290,7 @@ export default function CicdStudioPage() {
               ))}
             </div>
             {timeline ? (
-              <div className="rounded border border-border bg-card p-3">
+              <Card className="p-3" data-testid="delivery-panel">
                 <StageFlow timeline={timeline} />
                 {timeline.qualificationPending && (
                   <div className="mt-2 flex items-start gap-2 rounded border border-warn bg-warn-subtle px-3 py-2 text-[11px] text-warn" data-testid="qualification-pending">
@@ -295,15 +299,15 @@ export default function CicdStudioPage() {
                   </div>
                 )}
                 <div className="mt-2 flex gap-1.5">
-                  <button className="rounded border border-accent px-2 py-1 text-[10.5px] text-accent hover:bg-accent-subtle disabled:opacity-40" disabled={busy} onClick={() => void promote('TEST')} data-testid="promote-test">
+                  <Btn className="px-2 py-0.5 text-[10.5px]" disabled={busy} onClick={() => void promote('TEST')} data-testid="promote-test">
                     {i18nT('apps.cicd.promoteTest')}
-                  </button>
-                  <button className="rounded border border-danger px-2 py-1 text-[10.5px] text-danger hover:bg-danger-subtle disabled:opacity-40" disabled={busy} onClick={() => void promote('PROD')} data-testid="promote-prod">
+                  </Btn>
+                  <Btn danger className="px-2 py-0.5 text-[10.5px]" disabled={busy} onClick={() => void promote('PROD')} data-testid="promote-prod">
                     {i18nT('apps.cicd.promoteProd')}
-                  </button>
-                  <button className="rounded border border-border px-2 py-1 text-[10.5px] text-muted hover:bg-bg-hover disabled:opacity-40" disabled={busy} onClick={() => void promote('CLOSE')}>
+                  </Btn>
+                  <Btn className="px-2 py-0.5 text-[10.5px]" disabled={busy} onClick={() => void promote('CLOSE')}>
                     {i18nT('apps.cicd.close')}
-                  </button>
+                  </Btn>
                 </div>
                 <div className="mt-3">
                   <div className="mb-1 text-[11px] font-semibold text-text-strong">{i18nT('apps.cicd.evidenceChain')}</div>
@@ -319,12 +323,12 @@ export default function CicdStudioPage() {
                     ))}
                   </div>
                 </div>
-              </div>
+              </Card>
             ) : (
               <div className="p-4 text-center text-[12px] text-muted">{i18nT('apps.cicd.loading')}</div>
             )}
             {/* hard gates */}
-            <div className="rounded border border-border bg-card p-3">
+            <Card className="p-3">
               <div className="mb-1.5 flex items-center gap-1.5 text-[11.5px] font-semibold text-text-strong">
                 <ShieldAlert size={12} className="text-warn" />
                 {i18nT('apps.cicd.hardGates')}
@@ -335,7 +339,7 @@ export default function CicdStudioPage() {
                   <span className="text-muted">{g.statement}</span>
                 </div>
               ))}
-            </div>
+            </Card>
           </div>
         )}
 
@@ -353,11 +357,11 @@ export default function CicdStudioPage() {
               ))}
             </div>
             {csView ? (
-              <div className="rounded border border-border bg-card p-3">
+              <Card className="p-3">
                 <div className="mb-2 flex items-center gap-2">
                   <GitBranch size={12} className="text-accent" />
                   <span className="text-[12px] font-semibold text-text-strong">{csView.changeset.title}</span>
-                  <span className={`rounded border px-1.5 text-[9.5px] ${statusTone(csView.changeset.status === 'DIVERGED' ? 'BLOCKED' : 'ACCEPTED')}`}>{csView.changeset.status}</span>
+                  <Badge variant={statusVariant(csView.changeset.status === 'DIVERGED' ? 'BLOCKED' : 'ACCEPTED')}>{csView.changeset.status}</Badge>
                   {csView.delivery && <span className="font-mono text-[9.5px] text-muted">→ {csView.delivery.id}</span>}
                 </div>
                 {csView.divergenceWarning && (
@@ -368,7 +372,7 @@ export default function CicdStudioPage() {
                 )}
                 <Topology view={csView} />
                 <div className="mt-2 text-[9.5px] text-muted/70">{i18nT('apps.cicd.atomicNote')}</div>
-              </div>
+              </Card>
             ) : (
               <div className="p-4 text-center text-[12px] text-muted">{i18nT('apps.cicd.loading')}</div>
             )}
@@ -377,7 +381,7 @@ export default function CicdStudioPage() {
 
         {tab === 'adapter' && (
           <div className="flex flex-col gap-3">
-            <div className="rounded border border-border bg-card p-3">
+            <Card className="p-3">
               <div className="mb-1 text-[11.5px] font-semibold text-text-strong">{adapter?.e11b5.chapter} — {i18nT('apps.cicd.adapterSeam')}</div>
               <p className="mb-2 text-[10.5px] text-muted">{adapter?.e11b5.statement}</p>
               <div className="grid grid-cols-3 gap-2">
@@ -389,14 +393,14 @@ export default function CicdStudioPage() {
                   </div>
                 ))}
               </div>
-            </div>
-            <div className="rounded border border-border bg-card p-3">
+            </Card>
+            <Card className="p-3">
               <div className="mb-1.5 text-[11.5px] font-semibold text-text-strong">{i18nT('apps.cicd.restartTimeline')}</div>
               {(adapter?.timeline ?? []).map((t) => (
                 <div key={t.runId} className="mb-1.5 rounded border border-border/60 p-2" data-testid={`adapter-tl-${t.runId}`}>
                   <div className="flex items-center gap-2">
                     <span className="font-mono text-[10.5px] text-text-strong">{t.runId}</span>
-                    <span className={`rounded border px-1.5 text-[9px] ${statusTone(t.status)}`}>{t.status}</span>
+                    <Badge variant={statusVariant(t.status)}>{t.status}</Badge>
                     <span className="text-[9.5px] text-muted">{t.note}</span>
                   </div>
                   <div className="mt-1 text-[10px] text-muted">{t.lastFact}</div>
@@ -405,25 +409,25 @@ export default function CicdStudioPage() {
                 </div>
               ))}
               {adapter && adapter.timeline.length === 0 && <div className="text-[11px] text-muted">{i18nT('apps.cicd.noFailures')}</div>}
-            </div>
+            </Card>
           </div>
         )}
 
         {tab === 'vocab' && (
           <div className="flex flex-col gap-3">
-            <div className="rounded border border-border bg-card p-3">
+            <Card className="p-3">
               <div className="mb-2 text-[11.5px] font-semibold text-text-strong">{i18nT('apps.cicd.vocab.title')} ({pipe.statusWords.length})</div>
               <div className="flex flex-wrap gap-1.5">
                 {pipe.statusWords.map((w) => (
-                  <span key={w} className={`rounded border px-2 py-0.5 font-mono text-[10px] ${statusTone(w)}`} data-testid={`vocab-${w}`}>
+                  <Badge key={w} variant={statusVariant(w)} className="font-mono text-[10px]" data-testid={`vocab-${w}`}>
                     {w}
                     {w === 'UNKNOWN' && <span className="ml-1 font-sans text-[8.5px]">{i18nT('apps.cicd.notFailed')}</span>}
-                  </span>
+                  </Badge>
                 ))}
               </div>
               <div className="mt-2 text-[10px] text-muted">{i18nT('apps.cicd.unknownNote')}</div>
-            </div>
-            <div className="rounded border border-border bg-card p-3">
+            </Card>
+            <Card className="p-3">
               <div className="mb-2 text-[11.5px] font-semibold text-text-strong">{i18nT('apps.cicd.vocab.evidence')} ({pipe.evidenceLevels.length})</div>
               <div className="flex flex-wrap gap-1.5">
                 {pipe.evidenceLevels.map((l) => (
@@ -432,17 +436,17 @@ export default function CicdStudioPage() {
                   </span>
                 ))}
               </div>
-            </div>
-            <div className="rounded border border-border bg-card p-3">
+            </Card>
+            <Card className="p-3">
               <div className="mb-1.5 text-[11.5px] font-semibold text-text-strong">{i18nT('apps.cicd.vocab.works')}</div>
               {pipe.works.map((w) => (
                 <div key={w.id} className="mb-1 flex items-center gap-2">
-                  <span className={`rounded border px-1.5 text-[9.5px] ${statusTone(w.status)}`}>{w.status}</span>
+                  <Badge variant={statusVariant(w.status)}>{w.status}</Badge>
                   <span className="font-mono text-[10px] text-muted">{w.id}</span>
                   <span className="min-w-0 flex-1 truncate text-[11px] text-text">{w.title}</span>
                 </div>
               ))}
-            </div>
+            </Card>
           </div>
         )}
       </div>

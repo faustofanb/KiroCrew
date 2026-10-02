@@ -9,6 +9,7 @@ import { useEffect, useState } from 'react'
 import { Archive, GitBranch as BranchIcon, Loader2 } from 'lucide-react'
 import { api } from '../api'
 import { i18nT } from '../../../i18n/t'
+import { Btn, Checkbox } from '../../../components/ui'
 import type { DiffFile, StashItem } from '../types'
 import { ConfirmDialog, LoadState, TriState } from './common'
 import { DiffViewer } from './DiffViewer'
@@ -94,22 +95,23 @@ export function StashPanel(props: {
             className="h-7 min-w-0 flex-1 rounded border border-border bg-bg px-2 text-[11px] text-text outline-none focus:border-accent"
             data-testid="stash-message"
           />
-          <button
-            className="shrink-0 rounded bg-accent px-2.5 text-[11px] text-accent-fg hover:opacity-90 disabled:opacity-40"
+          <Btn
+            primary
+            className="shrink-0 px-2.5 py-0.5 text-[11px]"
             disabled={busy}
             onClick={push}
             data-testid="stash-push"
           >
             {busy ? <Loader2 size={11} className="animate-spin" /> : i18nT('apps.gitStudio.stash.push')}
-          </button>
+          </Btn>
         </div>
         <div className="mt-1.5 flex gap-3 text-[10px] text-muted">
           <label className="flex items-center gap-1">
-            <input type="checkbox" checked={optUntracked} onChange={(e) => setOptUntracked(e.target.checked)} className="h-3 w-3" />
+            <Checkbox checked={optUntracked} onChange={(e) => setOptUntracked(e.target.checked)} />
             {i18nT('apps.gitStudio.stash.includeUntracked')}
           </label>
           <label className="flex items-center gap-1">
-            <input type="checkbox" checked={optStagedOnly} onChange={(e) => setOptStagedOnly(e.target.checked)} className="h-3 w-3" />
+            <Checkbox checked={optStagedOnly} onChange={(e) => setOptStagedOnly(e.target.checked)} />
             {i18nT('apps.gitStudio.stash.stagedOnly')}
           </label>
         </div>
@@ -161,13 +163,13 @@ export function StashPanel(props: {
               className="h-6 min-w-0 flex-1 rounded border border-border bg-bg px-2 font-mono text-[10px] text-text outline-none focus:border-accent"
               data-testid="stash-branch-name"
             />
-            <button
-              className="shrink-0 rounded border border-border px-1.5 py-px text-[9.5px] text-text hover:bg-bg-hover disabled:opacity-40"
+            <Btn
+              className="shrink-0 px-1.5 py-0 text-[9.5px]"
               disabled={busy || !branchName.trim() || selected === null}
               onClick={() => run(i18nT('apps.gitStudio.stash.branched'), () => api.stashOp(props.repo, { op: 'branch', index: selected ?? 0, name: branchName.trim() }))}
             >
               {i18nT('apps.gitStudio.stash.branchFrom')}
-            </button>
+            </Btn>
           </div>
         )}
       </div>

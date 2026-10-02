@@ -2,18 +2,17 @@
  * SSH — connections, key inventory, streaming exec, interactive PTY, SFTP.
  *
  * Five tabs over one owner-gated backend (system ssh, key auth only, no
- * stored passwords): Connections (CRUD + connectivity probe with host-key
- * state and latency), Keys (~/.ssh/*.pub fingerprints + agent + known_hosts),
- * Exec (SSE-streamed stdout/stderr with exit codes + history), Terminal
- * (xterm.js over the websocket PTY bridge), Files (SFTP browse + upload +
- * download + mkdir/rename/remove). Every list carries empty/loading/error.
+ * stored passwords). Built on the dashboard's UI kit — SegmentedControl for
+ * the tab rail, Card/Badge/Btn/EmptyState/ErrorNotice for surfaces, the
+ * notification store for toasts — so it reads as native KiroCrew chrome;
+ * only the terminal (xterm.js) and the file table are bespoke
+ * high-density surfaces.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import {
-  AlertTriangle,
   ArrowUp,
   ChevronRight,
   Clock,
@@ -24,14 +23,18 @@ import {
   Play,
   Plus,
   RefreshCw,
-  ScrollText,
   Server,
   Terminal as TerminalIcon,
   Trash2,
   Upload,
 } from 'lucide-react'
 import { i18nT } from '../../i18n/t'
+import { Badge, Btn, Card, EmptyState, IconButton, Input } from '../../components/ui'
+import SegmentedControl from '../../components/SegmentedControl'
 import SimpleSelect from '../../components/SimpleSelect'
+import ErrorNotice from '../../components/ErrorNotice'
+import { useAppDispatch } from '../../store'
+import { addNotification } from '../../store/notificationsSlice'
 
 const BASE = '/api/apps/praxis-ssh'
 
@@ -56,7 +59,6 @@ type ExecEvent =
   | { type: 'done'; exitCode: number; error?: string }
   | { type: 'closed' }
 type HistItem = { at: number; connectionId: string; command: string; exitCode: number; timedOut?: boolean }
-
 type Load = 'idle' | 'loading' | 'error' | 'ready'
 
 async function j<T>(resp: Response): Promise<T> {
@@ -75,15 +77,23 @@ function Tri(props: { state: Load; error?: string | null; empty?: boolean; empty
         <Loader2 size={14} className="animate-spin text-muted" />
       </div>
     )
-  if (props.state === 'error')
-    return (
-      <div className="m-2 rounded border border-danger bg-danger-subtle p-2 text-[12px] text-danger">
-        <AlertTriangle size={12} className="mr-1 inline" />
-        {props.error}
-      </div>
-    )
-  if (props.empty) return <div className="p-4 text-center text-[12px] text-muted">{props.emptyText}</div>
+  if (props.state === 'error') return <ErrorNotice message={props.error || ''} />
+  if (props.empty) return <EmptyState icon={<Server size={22} />} title={props.emptyText ?? ''} testId="ssh-empty" />
   return <>{props.children}</>
+}
+
+function ConnSelect(props: { value: string; conns: Conn[]; onChange: (v: string) => void; disabled?: boolean }) {
+  return (
+    <SimpleSelect
+      options={props.conns.map((c) => c.id)}
+      optionLabels={props.conns.map((c) => c.name || c.host)}
+      value={props.value}
+      onChange={props.onChange}
+      disabled={props.disabled}
+      aria-label={i18nT('apps.ssh.tab.connections')}
+      className="h-8 max-w-52 py-0 font-mono text-[11px]"
+    />
+  )
 }
 
 // ── Connections tab ──────────────────────────────────────────────────────────
@@ -145,10 +155,10 @@ function ConnectionsTab(props: { onNotice: (k: 'ok' | 'error' | 'info', t: strin
     }
   }
 
-  const remove = async (id: string) => {
-    setBusy(id)
+  const remove = async (c: Conn) => {
+    setBusy(c.id)
     try {
-      await j(await fetch(`${BASE}/connections/${id}`, { method: 'DELETE' }))
+      await j(await fetch(`${BASE}/connections/${c.id}`, { method: 'DELETE' }))
       load()
     } catch (e) {
       props.onNotice('error', String(e))
@@ -157,70 +167,65 @@ function ConnectionsTab(props: { onNotice: (k: 'ok' | 'error' | 'info', t: strin
     }
   }
 
-  const stateTone = (s: string) =>
-    s === 'ok' ? 'text-ok' : s === 'hostkey-changed' ? 'text-danger' : s === 'auth-refused' || s === 'unreachable' || s === 'timeout' ? 'text-warn' : 'text-muted'
+  const probeBadge = (t: Conn['lastTest']) => {
+    if (!t) return null
+    if (t.ok) return <Badge variant="ok">{t.state}{t.latencyMs !== null ? ` ${t.latencyMs}ms` : ''}</Badge>
+    if (t.state === 'hostkey-changed') return <Badge variant="err">{t.state}</Badge>
+    return <Badge variant="warn">{t.state}</Badge>
+  }
 
   return (
     <div className="flex h-full min-h-0">
-      <div className="min-w-0 flex-1 overflow-y-auto p-3">
+      <div className="min-w-0 flex-1 space-y-2 overflow-y-auto p-3">
         <Tri state={state} error={error} empty={!conns.length} emptyText={i18nT('apps.ssh.conn.empty')}>
           {conns.map((c) => (
-            <div key={c.id} className="group mb-1.5 flex items-center gap-2 rounded border border-border bg-card px-3 py-2" data-testid={`ssh-conn-${c.host}`}>
-              <Server size={14} className="shrink-0 text-accent" />
+            <Card key={c.id} className="flex items-center gap-2.5 p-2.5" data-testid={`ssh-conn-${c.host}`}>
+              <Server size={15} className="shrink-0 text-accent" />
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-[12.5px] font-medium text-text-strong">{c.name || c.host}</span>
-                  <span className="shrink-0 font-mono text-[10px] text-muted">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="truncate text-[13px] font-medium text-text-strong">{c.name || c.host}</span>
+                  <span className="font-mono text-[11px] text-muted">
                     {c.user ? `${c.user}@` : ''}
                     {c.host}:{c.port}
                   </span>
-                  {c.lastTest && (
-                    <span className={`shrink-0 text-[10px] ${stateTone(c.lastTest.state)}`}>
-                      {c.lastTest.state}
-                      {c.lastTest.latencyMs !== null ? ` ${c.lastTest.latencyMs}ms` : ''}
-                    </span>
-                  )}
+                  {probeBadge(c.lastTest)}
                 </div>
-                {c.identityFile && <div className="truncate font-mono text-[9.5px] text-muted/70">🔑 {c.identityFile}</div>}
+                {c.identityFile && <div className="truncate font-mono text-[10px] text-muted/70">{c.identityFile}</div>}
               </div>
-              <div className="flex shrink-0 gap-1">
-                <button className="rounded border border-border px-2 py-0.5 text-[10px] text-text hover:bg-bg-hover" disabled={busy === c.id} onClick={() => void test(c.id)} data-testid={`ssh-test-${c.host}`}>
-                  {busy === c.id ? <Loader2 size={10} className="animate-spin" /> : i18nT('apps.ssh.conn.test')}
-                </button>
-                <button className="rounded border border-border px-2 py-0.5 text-[10px] text-danger hover:bg-danger-subtle" disabled={busy === c.id} onClick={() => void remove(c.id)}>
-                  <Trash2 size={10} />
-                </button>
+              <div className="flex shrink-0 gap-1.5">
+                <Btn className="py-0.5 text-[11px]" disabled={busy === c.id} onClick={() => void test(c.id)} data-testid={`ssh-test-${c.host}`}>
+                  {busy === c.id ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                  {i18nT('apps.ssh.conn.test')}
+                </Btn>
+                <IconButton variant="danger" aria-label={i18nT('apps.ssh.conn.remove', { name: c.name || c.host })} disabled={busy === c.id} onClick={() => void remove(c)}>
+                  <Trash2 size={13} />
+                </IconButton>
               </div>
-            </div>
+            </Card>
           ))}
         </Tri>
       </div>
-      <div className="w-72 shrink-0 border-l border-border p-3">
-        <div className="mb-2 flex items-center gap-1.5 text-[12px] font-semibold text-text-strong">
-          <Plus size={12} />
+      <Card className="w-72 shrink-0 rounded-none border-y-0 border-r-0 p-3">
+        <div className="mb-2 flex items-center gap-1.5 text-[13px] font-semibold text-text-strong">
+          <Plus size={13} />
           {i18nT('apps.ssh.conn.add')}
         </div>
         {(['name', 'host', 'port', 'user', 'identityFile'] as const).map((k) => (
-          <input
+          <Input
             key={k}
             value={form[k]}
             onChange={(e) => setForm((f) => ({ ...f, [k]: e.target.value }))}
             placeholder={i18nT(`apps.ssh.conn.field_${k}`)}
-            className="mb-1.5 h-8 w-full rounded border border-border bg-bg px-2 font-mono text-[11px] text-text outline-none focus:border-accent"
+            className="mb-1.5 h-8 font-mono text-[11.5px]"
             data-testid={`ssh-form-${k}`}
           />
         ))}
-        <p className="mb-2 text-[9.5px] leading-4 text-muted/70">{i18nT('apps.ssh.conn.noPassword')}</p>
-        <button
-          className="inline-flex w-full items-center justify-center gap-1 rounded bg-accent px-3 py-1.5 text-[12px] text-accent-fg hover:opacity-90 disabled:opacity-40"
-          disabled={busy === 'create' || !form.host.trim()}
-          onClick={() => void create()}
-          data-testid="ssh-create"
-        >
-          {busy === 'create' ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />}
+        <p className="mb-2 text-[10px] leading-4 text-muted/70">{i18nT('apps.ssh.conn.noPassword')}</p>
+        <Btn primary className="w-full justify-center" disabled={busy === 'create' || !form.host.trim()} onClick={() => void create()} data-testid="ssh-create">
+          {busy === 'create' ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
           {i18nT('apps.ssh.conn.add')}
-        </button>
-      </div>
+        </Btn>
+      </Card>
     </div>
   )
 }
@@ -256,53 +261,57 @@ function KeysTab() {
   return (
     <div className="grid h-full min-h-0 grid-cols-2 gap-3 overflow-y-auto p-3" data-testid="ssh-keys">
       <div>
-        <div className="mb-1.5 flex items-center gap-1.5 text-[12px] font-semibold text-text-strong">
-          <KeySquare size={12} className="text-accent" />
+        <div className="mb-2 flex items-center gap-1.5 text-[13px] font-semibold text-text-strong">
+          <KeySquare size={13} className="text-accent" />
           {i18nT('apps.ssh.keys.title')}
         </div>
         <Tri state={state} error={error} empty={!keys.length} emptyText={i18nT('apps.ssh.keys.empty')}>
-          {keys.map((k) => (
-            <div key={k.pubFile} className="mb-1 rounded border border-border bg-card px-2.5 py-1.5" data-testid={`ssh-key-${k.pubFile}`}>
-              <div className="flex items-center gap-2">
-                <span className="truncate font-mono text-[11px] text-text-strong">{k.pubFile}</span>
-                <span className="shrink-0 rounded bg-bg-hover px-1.5 text-[9px] text-muted">{k.type || '?'}</span>
-                {k.bits > 0 && <span className="shrink-0 font-mono text-[9px] text-muted/60">{k.bits}b</span>}
-                {!k.privatePresent && <span className="shrink-0 text-[9px] text-warn">{i18nT('apps.ssh.keys.pubOnly')}</span>}
-              </div>
-              <div className="truncate font-mono text-[9.5px] text-muted">{k.fingerprint}</div>
-              {k.comment && <div className="truncate text-[9.5px] text-muted/70">{k.comment}</div>}
-            </div>
-          ))}
+          <div className="space-y-1.5">
+            {keys.map((k) => (
+              <Card key={k.pubFile} className="p-2.5" data-testid={`ssh-key-${k.pubFile}`}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="truncate font-mono text-[12px] text-text-strong">{k.pubFile}</span>
+                  <Badge variant="muted">{k.type || '?'}</Badge>
+                  {k.bits > 0 && <span className="font-mono text-[10px] text-muted/60">{k.bits}b</span>}
+                  {!k.privatePresent && <Badge variant="warn">{i18nT('apps.ssh.keys.pubOnly')}</Badge>}
+                </div>
+                <div className="truncate font-mono text-[10px] text-muted">{k.fingerprint}</div>
+                {k.comment && <div className="truncate text-[10px] text-muted/70">{k.comment}</div>}
+              </Card>
+            ))}
+          </div>
         </Tri>
       </div>
       <div>
-        <div className="mb-1.5 flex items-center gap-1.5 text-[12px] font-semibold text-text-strong">
-          <Monitor size={12} className={agent?.running ? 'text-ok' : 'text-warn'} />
+        <div className="mb-2 flex items-center gap-1.5 text-[13px] font-semibold text-text-strong">
+          <Monitor size={13} className={agent?.running ? 'text-ok' : 'text-warn'} />
           {i18nT('apps.ssh.agent.title')}
-          <span className={`rounded px-1.5 text-[9.5px] ${agent?.running ? 'bg-ok-subtle text-ok' : 'bg-warn-subtle text-warn'}`}>
+          <Badge variant={agent?.running ? 'ok' : 'warn'}>
             {agent?.running ? i18nT('apps.ssh.agent.running') : i18nT('apps.ssh.agent.notRunning')}
-          </span>
+          </Badge>
         </div>
-        {agent && !agent.running && <div className="mb-2 text-[10px] text-warn">{agent.hint}</div>}
-        {agent?.keys.map((k, i) => (
-          <div key={i} className="truncate font-mono text-[10px] text-muted">
-            {k.fingerprint} <span className="text-muted/60">{k.type}</span>
-          </div>
-        ))}
-        <div className="mb-1.5 mt-4 flex items-center gap-1.5 text-[12px] font-semibold text-text-strong">
-          <Server size={12} className="text-muted" />
+        {agent && !agent.running && <div className="mb-2 text-[11px] text-warn">{agent.hint}</div>}
+        <div className="space-y-0.5">
+          {agent?.keys.map((k, i) => (
+            <div key={i} className="truncate font-mono text-[10.5px] text-muted">
+              {k.fingerprint} <span className="text-muted/60">{k.type}</span>
+            </div>
+          ))}
+        </div>
+        <div className="mb-2 mt-4 flex items-center gap-1.5 text-[13px] font-semibold text-text-strong">
+          <Server size={13} className="text-muted" />
           {i18nT('apps.ssh.knownHosts.title')}
-          <span className="text-[10px] font-normal text-muted">{kh?.total ?? 0}</span>
+          <span className="text-[11px] font-normal text-muted">{kh?.total ?? 0}</span>
         </div>
-        <div className="max-h-56 overflow-y-auto rounded border border-border/60">
+        <Card className="max-h-56 overflow-y-auto p-0">
           {(kh?.entries ?? []).slice(0, 100).map((e, i) => (
-            <div key={i} className="flex items-center gap-2 border-b border-border/20 px-2 py-0.5 font-mono text-[9.5px]">
+            <div key={i} className="flex items-center gap-2 border-b border-border/20 px-2 py-0.5 font-mono text-[10px] last:border-0">
               <span className={e.kind === 'hashed' ? 'text-muted/60' : 'text-text'}>{e.host}</span>
               <span className="ml-auto text-muted/60">{e.keyType}</span>
             </div>
           ))}
-          {kh?.truncated && <div className="px-2 py-1 text-[9px] text-warn">{i18nT('apps.ssh.knownHosts.truncated')}</div>}
-        </div>
+          {kh?.truncated && <div className="px-2 py-1 text-[9.5px] text-warn">{i18nT('apps.ssh.knownHosts.truncated')}</div>}
+        </Card>
       </div>
     </div>
   )
@@ -349,7 +358,7 @@ function ExecTab(props: { conns: Conn[]; onNotice: (k: 'ok' | 'error' | 'info', 
           try {
             const e = JSON.parse(ev.data) as ExecEvent
             if (e.type === 'line') setLines((l) => [...l.slice(-500), { stream: e.stream, text: e.text }])
-            else if (e.type === 'timeout') setLines((l) => [...l, { stream: 'stderr', text: `⏱ timeout ${e.seconds}s` }])
+            else if (e.type === 'timeout') setLines((l) => [...l, { stream: 'stderr', text: i18nT('apps.ssh.exec.timeoutLine', { s: String(e.seconds) }) }])
             else if (e.type === 'done') {
               setExit(e.exitCode)
               setRunning(false)
@@ -380,31 +389,24 @@ function ExecTab(props: { conns: Conn[]; onNotice: (k: 'ok' | 'error' | 'info', 
   return (
     <div className="flex h-full min-h-0">
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex shrink-0 items-center gap-2 border-b border-border p-2">
-          <SimpleSelect
-            options={props.conns.map((c) => c.id)}
-            optionLabels={props.conns.map((c) => c.name || c.host)}
-            value={connId}
-            onChange={setConnId}
-            aria-label={i18nT('apps.ssh.tab.connections')}
-            className="h-8 max-w-52 font-mono text-[11px]"
-          />
-          <input
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border p-2">
+          <Btn primary className="py-0.5" disabled={running || !command.trim() || !connId} onClick={run} data-testid="exec-run">
+            {running ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
+            {i18nT('apps.ssh.exec.run')}
+          </Btn>
+          <ConnSelect value={connId} conns={props.conns} onChange={setConnId} />
+          <Input
             value={command}
             onChange={(e) => setCommand(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && run()}
             placeholder={i18nT('apps.ssh.exec.placeholder')}
-            className="h-8 min-w-0 flex-1 rounded border border-border bg-bg px-2 font-mono text-[11.5px] text-text outline-none focus:border-accent"
+            className="h-8 min-w-0 flex-1 font-mono text-[11.5px]"
             data-testid="exec-command"
           />
-          <button className="inline-flex shrink-0 items-center gap-1 rounded bg-accent px-3 py-1.5 text-[11.5px] text-accent-fg hover:opacity-90 disabled:opacity-40" disabled={running || !command.trim() || !connId} onClick={run} data-testid="exec-run">
-            {running ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
-            {i18nT('apps.ssh.exec.run')}
-          </button>
-          {exit !== null && <span className={`shrink-0 font-mono text-[10px] ${exit === 0 ? 'text-ok' : 'text-danger'}`}>exit {exit}</span>}
+          {exit !== null && <Badge variant={exit === 0 ? 'ok' : 'err'}>exit {exit}</Badge>}
         </div>
         <div ref={boxRef} className="min-h-0 flex-1 overflow-y-auto bg-bg p-2 font-mono text-[11px] leading-5" data-testid="exec-output">
-          {lines.length === 0 && !running && <div className="p-4 text-center text-muted">{i18nT('apps.ssh.exec.empty')}</div>}
+          {lines.length === 0 && !running && <EmptyState icon={<TerminalIcon size={20} />} title={i18nT('apps.ssh.exec.empty')} testId="exec-empty" />}
           {lines.map((l, i) => (
             <div key={i} className={`whitespace-pre-wrap break-all ${l.stream === 'stderr' ? 'text-danger' : 'text-text'}`}>
               {l.text}
@@ -413,8 +415,8 @@ function ExecTab(props: { conns: Conn[]; onNotice: (k: 'ok' | 'error' | 'info', 
           {running && <Loader2 size={11} className="animate-spin text-muted" />}
         </div>
       </div>
-      <div className="w-64 shrink-0 overflow-y-auto border-l border-border p-2">
-        <div className="mb-1.5 flex items-center gap-1.5 text-[11.5px] font-semibold text-text-strong">
+      <Card className="w-64 shrink-0 overflow-y-auto rounded-none border-y-0 border-r-0 p-2">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[12px] font-semibold text-text-strong">
           <Clock size={11} className="text-muted" />
           {i18nT('apps.ssh.exec.history')}
         </div>
@@ -422,14 +424,14 @@ function ExecTab(props: { conns: Conn[]; onNotice: (k: 'ok' | 'error' | 'info', 
         {hist.slice().reverse().map((h, i) => (
           <button
             key={i}
-            className="mb-1 block w-full truncate rounded px-1.5 py-1 text-left font-mono text-[10px] text-text hover:bg-bg-hover"
+            className="block w-full truncate rounded px-1.5 py-1 text-left font-mono text-[10px] text-text hover:bg-bg-hover"
             title={h.command}
             onClick={() => setCommand(h.command)}
           >
             <span className={h.exitCode === 0 ? 'text-ok' : 'text-danger'}>{h.exitCode}</span> {h.command}
           </button>
         ))}
-      </div>
+      </Card>
     </div>
   )
 }
@@ -469,7 +471,10 @@ function TerminalTab(props: { conns: Conn[]; onNotice: (k: 'ok' | 'error' | 'inf
       term.write(new Uint8Array(ev.data))
     }
     ws.onclose = () => {
-      term.write('\r\n\x1b[90m— ' + i18nT('apps.ssh.term.closed') + ' —\x1b[0m')
+      term.writeln('')
+      const dim = String.fromCharCode(27).concat('[90m')
+      const reset = String.fromCharCode(27).concat('[0m')
+      term.write(dim.concat(i18nT('apps.ssh.term.closed'), reset))
       setActive(null)
     }
     ws.onerror = () => props.onNotice('error', i18nT('apps.ssh.term.error'))
@@ -488,25 +493,17 @@ function TerminalTab(props: { conns: Conn[]; onNotice: (k: 'ok' | 'error' | 'inf
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="ssh-terminal">
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
+      <div className="flex h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border px-3">
         <TerminalIcon size={13} className="text-accent" />
-        <SimpleSelect
-          options={props.conns.map((c) => c.id)}
-          optionLabels={props.conns.map((c) => c.name || c.host)}
-          value={connId}
-          onChange={setConnId}
-          disabled={!!active}
-          aria-label={i18nT('apps.ssh.tab.connections')}
-          className="h-7 max-w-52 font-mono text-[11px]"
-        />
+        <ConnSelect value={connId} conns={props.conns} onChange={setConnId} disabled={!!active} />
         {active ? (
-          <button className="rounded border border-danger px-2.5 py-1 text-[11px] text-danger hover:bg-danger-subtle" onClick={close} data-testid="term-close">
+          <Btn danger className="py-0.5 text-[11px]" onClick={close} data-testid="term-close">
             {i18nT('apps.ssh.term.close')}
-          </button>
+          </Btn>
         ) : (
-          <button className="rounded bg-accent px-3 py-1 text-[11.5px] text-accent-fg hover:opacity-90 disabled:opacity-40" disabled={!connId} onClick={open} data-testid="term-open">
+          <Btn primary className="py-0.5 text-[11.5px]" disabled={!connId} onClick={open} data-testid="term-open">
             {i18nT('apps.ssh.term.open')}
-          </button>
+          </Btn>
         )}
         {active && conn && (
           <span className="font-mono text-[10px] text-muted">
@@ -517,7 +514,7 @@ function TerminalTab(props: { conns: Conn[]; onNotice: (k: 'ok' | 'error' | 'inf
         <span className="ml-auto text-[9.5px] text-muted/60">{i18nT('apps.ssh.term.hint')}</span>
       </div>
       <div ref={holderRef} className={`min-h-0 flex-1 overflow-hidden bg-bg p-2 ${active ? '' : 'flex items-center justify-center'}`} data-testid="term-holder">
-        {!active && <div className="text-[12px] text-muted">{i18nT('apps.ssh.term.pickFirst')}</div>}
+        {!active && <EmptyState icon={<TerminalIcon size={22} />} title={i18nT('apps.ssh.term.pickFirst')} testId="term-empty" />}
       </div>
     </div>
   )
@@ -532,6 +529,7 @@ function FilesTab(props: { conns: Conn[]; onNotice: (k: 'ok' | 'error' | 'info',
   const [state, setState] = useState<Load>('idle')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [renaming, setRenaming] = useState<{ from: string } | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
@@ -601,13 +599,13 @@ function FilesTab(props: { conns: Conn[]; onNotice: (k: 'ok' | 'error' | 'info',
     <div className="flex h-full min-h-0 flex-col" data-testid="ssh-files">
       <div className="flex h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border px-3">
         <FolderTree size={13} className="text-accent" />
-        <SimpleSelect
-          options={props.conns.map((c) => c.id)}
-          optionLabels={props.conns.map((c) => c.name || c.host)}
+        <ConnSelect
           value={connId}
-          onChange={(v) => { setConnId(v); setEntries(null) }}
-          aria-label={i18nT('apps.ssh.tab.connections')}
-          className="h-7 max-w-52 font-mono text-[11px]"
+          conns={props.conns}
+          onChange={(v) => {
+            setConnId(v)
+            setEntries(null)
+          }}
         />
         <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto font-mono text-[11px]">
           <button className="rounded px-1 text-accent hover:bg-bg-hover" onClick={() => load('/')}>
@@ -615,28 +613,20 @@ function FilesTab(props: { conns: Conn[]; onNotice: (k: 'ok' | 'error' | 'info',
           </button>
           {crumbs.map((c, i) => (
             <span key={i} className="flex shrink-0 items-center">
-              <button
-                className="rounded px-1 text-text hover:bg-bg-hover"
-                onClick={() => load('/' + crumbs.slice(0, i + 1).join('/'))}
-              >
+              <button className="rounded px-1 text-text hover:bg-bg-hover" onClick={() => load('/' + crumbs.slice(0, i + 1).join('/'))}>
                 {c}
               </button>
               {i < crumbs.length - 1 && <ChevronRight size={10} className="text-muted/50" />}
             </span>
           ))}
         </div>
-        <button className="rounded border border-border p-1 text-muted hover:bg-bg-hover hover:text-text" disabled={busy || !connId} onClick={() => load(path)} title={i18nT('apps.ssh.files.refresh')}>
-          <RefreshCw size={11} />
-        </button>
-        <button
-          className="inline-flex items-center gap-1 rounded border border-accent px-2 py-1 text-[10.5px] text-accent hover:bg-accent-subtle disabled:opacity-40"
-          disabled={busy || !connId}
-          onClick={() => fileInputRef.current?.click()}
-          data-testid="sftp-upload-btn"
-        >
+        <IconButton aria-label={i18nT('apps.ssh.files.refresh')} disabled={busy || !connId} onClick={() => load(path)}>
+          <RefreshCw size={12} />
+        </IconButton>
+        <Btn className="py-0.5 text-[10.5px]" disabled={busy || !connId} onClick={() => fileInputRef.current?.click()} data-testid="sftp-upload-btn">
           <Upload size={10} />
           {i18nT('apps.ssh.files.upload')}
-        </button>
+        </Btn>
         <input
           ref={fileInputRef}
           type="file"
@@ -683,25 +673,28 @@ function FilesTab(props: { conns: Conn[]; onNotice: (k: 'ok' | 'error' | 'info',
                     <td className="px-2 py-1 text-muted">{e.mtime}</td>
                     <td className="px-2 py-1 text-muted/70">{e.owner}</td>
                     <td className="px-2 py-1 text-right">
-                      <div className="hidden gap-1 group-hover:flex">
-                        <button
-                          className="rounded border border-border px-1.5 py-px text-[9px] text-muted"
-                          onClick={() => {
-                            const name = prompt(i18nT('apps.ssh.files.newName'))
-                            if (name) void op(() => fetch(`${BASE}/sftp/rename`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ connectionId: connId, from: joinPath(path, e.name), to: joinPath(path, name) }) }).then(j), name)
-                          }}
-                        >
+                      <div className="hidden justify-end gap-1 group-hover:flex">
+                        <Btn className="px-1.5 py-0 text-[9px]" onClick={() => setRenaming({ from: e.name })}>
                           {i18nT('apps.ssh.files.rename')}
-                        </button>
-                        <button
-                          className="rounded border border-danger px-1.5 py-px text-[9px] text-danger"
+                        </Btn>
+                        <Btn
+                          danger
+                          className="px-1.5 py-0 text-[9px]"
                           onClick={() => {
                             if (!window.confirm(i18nT('apps.ssh.files.rmConfirm', { name: e.name }))) return
-                            void op(() => fetch(`${BASE}/sftp/remove`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ connectionId: connId, path: joinPath(path, e.name), recursive: e.dir }) }).then(j), e.name)
+                            void op(
+                              () =>
+                                fetch(`${BASE}/sftp/remove`, {
+                                  method: 'POST',
+                                  headers: { 'content-type': 'application/json' },
+                                  body: JSON.stringify({ connectionId: connId, path: joinPath(path, e.name), recursive: e.dir }),
+                                }).then(j),
+                              e.name,
+                            )
                           }}
                         >
                           ×
-                        </button>
+                        </Btn>
                       </div>
                     </td>
                   </tr>
@@ -713,9 +706,9 @@ function FilesTab(props: { conns: Conn[]; onNotice: (k: 'ok' | 'error' | 'info',
       </div>
       <div className="flex h-9 shrink-0 items-center gap-2 border-t border-border px-3">
         <ArrowUp size={11} className="text-muted" />
-        <input
+        <Input
           placeholder={i18nT('apps.ssh.files.mkdirPlaceholder')}
-          className="h-6 w-56 rounded border border-border bg-bg px-2 font-mono text-[10.5px] text-text outline-none focus:border-accent"
+          className="h-6 w-56 font-mono text-[10.5px]"
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               const name = (e.target as HTMLInputElement).value.trim()
@@ -736,6 +729,49 @@ function FilesTab(props: { conns: Conn[]; onNotice: (k: 'ok' | 'error' | 'info',
           data-testid="sftp-mkdir"
         />
       </div>
+      {renaming && (
+        <RenameOverlay
+          initial={renaming.from}
+          onCancel={() => setRenaming(null)}
+          onApply={(name) => {
+            const from = renaming.from
+            setRenaming(null)
+            void op(
+              () =>
+                fetch(`${BASE}/sftp/rename`, {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ connectionId: connId, from: joinPath(path, from), to: joinPath(path, name) }),
+                }).then(j),
+              name,
+            )
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+function RenameOverlay(props: { initial: string; onCancel: () => void; onApply: (name: string) => void }) {
+  const [value, setValue] = useState(props.initial)
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+      <Card className="w-full max-w-sm p-4">
+        <div className="mb-2 text-[13px] font-semibold text-text-strong">{i18nT('apps.ssh.files.rename')}</div>
+        <Input
+          autoFocus
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          className="mb-3 h-8 font-mono text-[12px]"
+          onKeyDown={(e) => e.key === 'Enter' && value.trim() && props.onApply(value.trim())}
+        />
+        <div className="flex justify-end gap-2">
+          <Btn onClick={props.onCancel}>{i18nT('apps.ssh.files.cancelRename')}</Btn>
+          <Btn primary disabled={!value.trim()} onClick={() => props.onApply(value.trim())}>
+            {i18nT('apps.ssh.files.rename')}
+          </Btn>
+        </div>
+      </Card>
     </div>
   )
 }
@@ -753,18 +789,22 @@ export default function SshPage() {
   const [tab, setTab] = useState<Tab>('connections')
   const [refreshKey, setRefreshKey] = useState(0)
   const [conns, setConns] = useState<Conn[]>([])
-  const [notices, setNotices] = useState<{ id: number; kind: 'ok' | 'error' | 'info'; text: string }[]>([])
+  const dispatch = useAppDispatch()
 
-  const notice = useCallback((kind: 'ok' | 'error' | 'info', text: string) => {
-    setNotices((n) => [...n.slice(-3), { id: Date.now() + Math.random(), kind, text }])
-    setRefreshKey((k) => k + 1)
-  }, [])
-  const dismiss = useCallback((id: number) => setNotices((n) => n.filter((x) => x.id !== id)), [])
-  useEffect(() => {
-    if (!notices.length) return
-    const t = setTimeout(() => setNotices((n) => n.slice(1)), 5000)
-    return () => clearTimeout(t)
-  }, [notices])
+  const notice = useCallback(
+    (kind: 'ok' | 'error' | 'info', text: string) => {
+      dispatch(
+        addNotification({
+          ts: String(Date.now()),
+          title: text,
+          body: '',
+          kind: kind === 'ok' ? 'success' : kind === 'error' ? 'error' : 'info',
+        }),
+      )
+      setRefreshKey((k) => k + 1)
+    },
+    [dispatch],
+  )
 
   useEffect(() => {
     fetch(`${BASE}/connections`)
@@ -773,30 +813,19 @@ export default function SshPage() {
       .catch(() => {})
   }, [refreshKey])
 
-  const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
-    { id: 'connections', label: i18nT('apps.ssh.tab.connections'), icon: <Server size={12} /> },
-    { id: 'keys', label: i18nT('apps.ssh.tab.keys'), icon: <KeySquare size={12} /> },
-    { id: 'exec', label: i18nT('apps.ssh.tab.exec'), icon: <Play size={12} /> },
-    { id: 'terminal', label: i18nT('apps.ssh.tab.terminal'), icon: <TerminalIcon size={12} /> },
-    { id: 'files', label: i18nT('apps.ssh.tab.files'), icon: <FolderTree size={12} /> },
-  ]
+  const tabs = [
+    { key: 'connections', label: i18nT('apps.ssh.tab.connections'), icon: <Server size={11} /> },
+    { key: 'keys', label: i18nT('apps.ssh.tab.keys'), icon: <KeySquare size={11} /> },
+    { key: 'exec', label: i18nT('apps.ssh.tab.exec'), icon: <Play size={11} /> },
+    { key: 'terminal', label: i18nT('apps.ssh.tab.terminal'), icon: <TerminalIcon size={11} /> },
+    { key: 'files', label: i18nT('apps.ssh.tab.files'), icon: <FolderTree size={11} /> },
+  ] as const
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border bg-card px-3">
-        <ScrollText size={13} className="text-accent" />
-        <span className="mr-2 text-[14px] font-semibold text-text-strong">{i18nT('apps.ssh.title')}</span>
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            className={`flex items-center gap-1 rounded px-2.5 py-1 text-[11.5px] ${tab === t.id ? 'bg-accent-subtle font-semibold text-accent' : 'text-muted hover:bg-bg-hover'}`}
-            onClick={() => setTab(t.id)}
-            data-testid={`ssh-tab-${t.id}`}
-          >
-            {t.icon}
-            {t.label}
-          </button>
-        ))}
+      <div className="flex h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-card px-3">
+        <span className="text-[14px] font-semibold text-text-strong">{i18nT('apps.ssh.title')}</span>
+        <SegmentedControl segments={[...tabs]} value={tab} onChange={(t) => setTab(t as Tab)} layoutId="ssh-tabs" ariaLabel={i18nT('apps.ssh.title')} />
         <span className="ml-auto text-[9.5px] text-muted/60">{i18nT('apps.ssh.policyHint')}</span>
       </div>
       <div className="min-h-0 flex-1">
@@ -805,17 +834,6 @@ export default function SshPage() {
         {tab === 'exec' && <ExecTab conns={conns} onNotice={notice} />}
         {tab === 'terminal' && <TerminalTab conns={conns} onNotice={notice} />}
         {tab === 'files' && <FilesTab conns={conns} onNotice={notice} />}
-      </div>
-      <div className="pointer-events-none fixed bottom-4 right-4 z-40 flex w-80 flex-col gap-2">
-        {notices.map((n) => (
-          <button
-            key={n.id}
-            onClick={() => dismiss(n.id)}
-            className={`pointer-events-auto rounded border px-3 py-2 text-left text-[12px] shadow-lg ${n.kind === 'error' ? 'border-danger bg-danger-subtle text-danger' : n.kind === 'ok' ? 'border-ok bg-ok-subtle text-ok' : 'border-border bg-card text-text'}`}
-          >
-            {n.text}
-          </button>
-        ))}
       </div>
     </div>
   )

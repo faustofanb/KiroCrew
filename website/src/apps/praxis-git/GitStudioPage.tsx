@@ -26,6 +26,10 @@ import {
 } from 'lucide-react'
 import { api, GitStudioApiError } from './api'
 import SimpleSelect from '../../components/SimpleSelect'
+import { Badge, Btn, Checkbox, IconButton } from '../../components/ui'
+import SegmentedControl from '../../components/SegmentedControl'
+import { useAppDispatch } from '../../store'
+import { addNotification } from '../../store/notificationsSlice'
 import { i18nT } from '../../i18n/t'
 import type {
   Branch,
@@ -49,7 +53,7 @@ import { RebasePanel } from './components/RebasePanel'
 import { StashPanel } from './components/StashPanel'
 import { BlameView, FileHistoryView } from './components/HistoryViews'
 import { BranchTree } from './components/BranchTree'
-import { ConfirmDialog, LoadState, Notices, TriState, type Notice } from './components/common'
+import { ConfirmDialog, LoadState, TriState } from './components/common'
 
 type RightView =
   | { kind: 'none' }
@@ -111,15 +115,24 @@ export default function GitStudioPage() {
   const [commitMsg, setCommitMsg] = useState('')
   const [commitBusy, setCommitBusy] = useState(false)
   const [confirm, setConfirm] = useState<{ title: string; body: string; danger?: boolean; run: () => Promise<void> } | null>(null)
-  const [notices, setNotices] = useState<Notice[]>([])
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const dispatch = useAppDispatch()
   const [busy, setBusy] = useState(false)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
 
-  const notice = useCallback((kind: Notice['kind'], text: string) => {
-    setNotices((n) => [...n.slice(-4), { id: Date.now() + Math.random(), kind, text }])
-  }, [])
-  const dismiss = useCallback((id: number) => setNotices((n) => n.filter((x) => x.id !== id)), [])
+  const notice = useCallback(
+    (kind: 'ok' | 'error' | 'info', text: string) => {
+      dispatch(
+        addNotification({
+          ts: String(Date.now()),
+          title: text,
+          body: '',
+          kind: kind === 'ok' ? 'success' : kind === 'error' ? 'error' : 'info',
+        }),
+      )
+    },
+    [dispatch],
+  )
 
   const errText = (e: unknown) => (e instanceof GitStudioApiError ? `${e.message}${e.hint ? ` (${e.hint})` : ''}` : e instanceof Error ? e.message : String(e))
 
@@ -565,9 +578,9 @@ export default function GitStudioPage() {
             className="h-6.5 min-w-0 flex-1 rounded border border-border bg-bg px-2 text-[10px] text-text outline-none placeholder:text-muted focus:border-accent"
             data-testid="add-repo-input"
           />
-          <button className="shrink-0 rounded border border-border p-1 text-muted hover:bg-bg-hover hover:text-text" onClick={() => void addRepo()} disabled={adding} title={i18nT('apps.gitStudio.repos.add')} data-testid="add-repo-go">
-            {adding ? <Loader2 size={10} className="animate-spin" /> : <Plus size={10} />}
-          </button>
+          <IconButton aria-label={i18nT('apps.gitStudio.repos.add')} variant="accent" onClick={() => void addRepo()} disabled={adding} title={i18nT('apps.gitStudio.repos.add')} data-testid="add-repo-go">
+            {adding ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />}
+          </IconButton>
         </div>
         <div className="max-h-44 shrink-0 overflow-y-auto border-b border-border p-1">
           <TriState state={reposState} error={reposError} empty={!repos.length} emptyText={i18nT('apps.gitStudio.repos.empty')}>
@@ -594,7 +607,7 @@ export default function GitStudioPage() {
                 <button
                   className="hidden shrink-0 rounded p-0.5 text-muted hover:text-danger group-hover:block"
                   title={i18nT('apps.gitStudio.repos.remove')}
-                  onClick={() =>
+                  onClick={() => {
                     setConfirm({
                       title: i18nT('apps.gitStudio.confirm.removeRepoTitle'),
                       body: i18nT('apps.gitStudio.confirm.removeRepoBody', { name: r.name }),
@@ -602,7 +615,7 @@ export default function GitStudioPage() {
                         await api.removeRepo(r.id)
                       },
                     })
-                  }
+                  }}
                 >
                   <Trash2 size={10} />
                 </button>
@@ -650,12 +663,12 @@ export default function GitStudioPage() {
             data-testid="graph-search"
           />
           <label className="flex shrink-0 items-center gap-1 text-[9.5px] text-muted" title={i18nT('apps.gitStudio.graph.firstParentHint')}>
-            <input type="checkbox" checked={firstParent} onChange={(e) => setFirstParent(e.target.checked)} className="h-3 w-3" data-testid="first-parent-toggle" />
+            <Checkbox checked={firstParent} onChange={(e) => setFirstParent(e.target.checked)} data-testid="first-parent-toggle" />
             1st
           </label>
-          <button className="ml-auto shrink-0 rounded border border-border p-1 text-muted hover:bg-bg-hover hover:text-text" onClick={() => refreshAll({ graph: true })} title={`${i18nT('apps.gitStudio.palette.refresh')} (r)`} data-testid="refresh-all">
-            <RefreshCw size={11} />
-          </button>
+          <IconButton aria-label={i18nT('apps.gitStudio.palette.refresh')} className="ml-auto shrink-0" onClick={() => refreshAll({ graph: true })} title={`${i18nT('apps.gitStudio.palette.refresh')} (r)`} data-testid="refresh-all">
+            <RefreshCw size={12} />
+          </IconButton>
         </div>
 
         {/* in-progress banners */}
@@ -665,25 +678,26 @@ export default function GitStudioPage() {
             {conflicts.length > 0 ? (
               <>
                 {i18nT('apps.gitStudio.banner.mergeConflicts', { n: String(conflicts.length) })}
-                <button className="rounded border border-warn px-2 py-px text-[10px] hover:bg-warn/10" onClick={() => setView({ kind: 'conflict' })}>
+                <Btn className="px-2 py-0.5 text-[10px]" onClick={() => setView({ kind: 'conflict' })}>
                   {i18nT('apps.gitStudio.banner.openResolver')}
-                </button>
+                </Btn>
               </>
             ) : (
               <>
                 {i18nT('apps.gitStudio.banner.mergeInProgress')}
-                <button
-                  className="rounded border border-warn px-2 py-px text-[10px] hover:bg-warn/10"
+                <Btn
+                  className="px-2 py-0.5 text-[10px]"
                   disabled={busy}
                   onClick={() => repoId && void run(i18nT('apps.gitStudio.notice.mergeCommitted'), () => api.mergeContinue(repoId), { graph: true })}
                   data-testid="merge-continue"
                 >
                   {i18nT('apps.gitStudio.banner.finishMerge')}
-                </button>
+                </Btn>
               </>
             )}
-            <button
-              className="ml-auto rounded border border-warn px-2 py-px text-[10px] hover:bg-warn/10"
+            <Btn
+              danger
+              className="ml-auto px-2 py-0.5 text-[10px]"
               disabled={busy}
               onClick={() =>
                 setConfirm({
@@ -697,7 +711,7 @@ export default function GitStudioPage() {
               }
             >
               {i18nT('apps.gitStudio.banner.abortMerge')}
-            </button>
+            </Btn>
           </div>
         )}
         {(inProgress === 'cherry-pick' || inProgress === 'revert') && (
@@ -705,19 +719,20 @@ export default function GitStudioPage() {
             <AlertTriangle size={12} />
             {conflicts.length > 0 ? i18nT('apps.gitStudio.banner.sequencerConflicts', { op: inProgress }) : i18nT('apps.gitStudio.banner.sequencerInProgress', { op: inProgress })}
             {conflicts.length > 0 && (
-              <button className="rounded border border-warn px-2 py-px text-[10px] hover:bg-warn/10" onClick={() => setView({ kind: 'conflict' })}>
+              <Btn className="px-2 py-0.5 text-[10px]" onClick={() => setView({ kind: 'conflict' })}>
                 {i18nT('apps.gitStudio.banner.openResolver')}
-              </button>
+              </Btn>
             )}
-            <button
-              className="ml-auto rounded border border-warn px-2 py-px text-[10px] hover:bg-warn/10"
+            <Btn
+              className="ml-auto px-2 py-0.5 text-[10px]"
               disabled={busy}
               onClick={() => repoId && void run(i18nT('apps.gitStudio.notice.continued'), () => api.sequencer(repoId, 'continue', inProgress === 'cherry-pick' ? 'cherry-pick' : 'revert'), { graph: true })}
             >
               {i18nT('apps.gitStudio.banner.continue')}
-            </button>
-            <button
-              className="rounded border border-warn px-2 py-px text-[10px] hover:bg-warn/10"
+            </Btn>
+            <Btn
+              danger
+              className="px-2 py-0.5 text-[10px]"
               disabled={busy}
               onClick={() =>
                 setConfirm({
@@ -731,7 +746,7 @@ export default function GitStudioPage() {
               }
             >
               {i18nT('apps.gitStudio.banner.abort')}
-            </button>
+            </Btn>
           </div>
         )}
 
@@ -772,25 +787,25 @@ export default function GitStudioPage() {
               {fileZones.untracked.length} {i18nT('apps.gitStudio.workdir.untracked')}
             </span>
             {fileZones.conflicted.length > 0 && (
-              <button className="rounded bg-danger-subtle px-1.5 py-px text-[9.5px] text-danger" onClick={() => setView({ kind: 'conflict' })} data-testid="count-conflicted">
+              <Badge variant="err" className="cursor-pointer" onClick={() => setView({ kind: 'conflict' })} data-testid="count-conflicted">
                 {fileZones.conflicted.length} {i18nT('apps.gitStudio.workdir.conflicted')}
-              </button>
+              </Badge>
             )}
             <div className="ml-auto flex gap-1">
               {repoId && (
-                <button className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted hover:bg-bg-hover" disabled={busy} onClick={() => void run(i18nT('apps.gitStudio.notice.stagedAll'), () => api.stageAll(repoId))} data-testid="stage-all">
+                <Btn className="px-1.5 py-0.5 text-[10px]" disabled={busy} onClick={() => void run(i18nT('apps.gitStudio.notice.stagedAll'), () => api.stageAll(repoId))} data-testid="stage-all">
                   +{i18nT('apps.gitStudio.workdir.all')}
-                </button>
+                </Btn>
               )}
               {repoId && fileZones.staged.length > 0 && (
-                <button className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted hover:bg-bg-hover" disabled={busy} onClick={() => void run(i18nT('apps.gitStudio.notice.unstagedAll'), () => api.stageAll(repoId, true))}>
+                <Btn className="px-1.5 py-0.5 text-[10px]" disabled={busy} onClick={() => void run(i18nT('apps.gitStudio.notice.unstagedAll'), () => api.stageAll(repoId, true))}>
                   −{i18nT('apps.gitStudio.workdir.all')}
-                </button>
+                </Btn>
               )}
               {status && status.stashCount > 0 && (
-                <button className="rounded border border-warn px-1.5 py-0.5 text-[10px] text-warn hover:bg-warn-subtle" onClick={() => setView({ kind: 'stash' })} data-testid="stash-count">
+                <Badge variant="warn" className="cursor-pointer" onClick={() => setView({ kind: 'stash' })} data-testid="stash-count">
                   {i18nT('apps.gitStudio.view.stash')} {status.stashCount}
-                </button>
+                </Badge>
               )}
             </div>
           </div>
@@ -816,22 +831,23 @@ export default function GitStudioPage() {
                 data-testid="commit-message"
               />
               <div className="flex gap-1">
-                <button
-                  className="flex-1 rounded bg-accent px-2 py-1 text-[11px] text-accent-fg hover:opacity-90 disabled:opacity-40"
+                <Btn
+                  primary
+                  className="flex-1 px-2 py-1 text-[11px]"
                   disabled={commitBusy || !repoId || fileZones.staged.length === 0}
                   onClick={() => void doCommit(false)}
                   data-testid="commit-go"
                 >
                   {commitBusy ? <Loader2 size={11} className="mx-auto animate-spin" /> : `${i18nT('apps.gitStudio.workdir.commit')} (${fileZones.staged.length})`}
-                </button>
-                <button
-                  className="rounded border border-border px-2 py-1 text-[11px] text-muted hover:bg-bg-hover disabled:opacity-40"
+                </Btn>
+                <Btn
+                  className="px-2 py-1 text-[11px]"
                   disabled={commitBusy || !repoId}
                   onClick={() => void doCommit(true)}
                   title={i18nT('apps.gitStudio.workdir.amendHint')}
                 >
                   {i18nT('apps.gitStudio.workdir.amend')}
-                </button>
+                </Btn>
               </div>
             </div>
           </div>
@@ -840,26 +856,23 @@ export default function GitStudioPage() {
 
       {/* ── right panel ──────────────────────────────────────────────────── */}
       <div className="flex min-w-0 flex-1 flex-col border-l border-border">
-        <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-border bg-card px-2">
-          {viewTabs.map((t) => (
-            <button
-              key={t.id}
-              className={`shrink-0 rounded px-2 py-0.5 text-[11px] ${view.kind === t.id ? 'bg-accent-subtle font-semibold text-accent' : 'text-muted hover:bg-bg-hover'}`}
-              onClick={() => {
-                if (t.id === 'commit' && selectedSha) setView({ kind: 'commit', sha: selectedSha })
-                else if (t.id === 'stash' || t.id === 'conflict' || t.id === 'rebase') setView({ kind: t.id } as RightView)
-                else if (t.id === 'search') setView({ kind: 'search', query: searchQuery || '' })
-                else if (view.kind !== t.id) notice('info', i18nT('apps.gitStudio.view.pickTargetFirst'))
-              }}
-              data-testid={`tab-${t.id}`}
-            >
-              {t.label}
-            </button>
-          ))}
+        <div className="flex h-9 shrink-0 items-center gap-2 overflow-x-auto border-b border-border bg-card px-2">
+          <SegmentedControl
+            segments={viewTabs.map((t) => ({ key: t.id, label: t.label, disabled: t.id === 'commit' && !selectedSha }))}
+            value={view.kind}
+            onChange={(k) => {
+              if (k === 'commit' && selectedSha) setView({ kind: 'commit', sha: selectedSha })
+              else if (k === 'stash' || k === 'conflict' || k === 'rebase') setView({ kind: k } as RightView)
+              else if (k === 'search') setView({ kind: 'search', query: searchQuery || '' })
+              else if (view.kind !== k) notice('info', i18nT('apps.gitStudio.view.pickTargetFirst'))
+            }}
+            layoutId="gitstudio-view"
+            ariaLabel={i18nT('apps.gitStudio.title')}
+          />
           <div className="ml-auto flex shrink-0 items-center gap-1">
             {view.kind === 'file' && (
               <label className="flex items-center gap-1 text-[9.5px] text-muted" title={i18nT('apps.gitStudio.diff.sbsHint')}>
-                <input type="checkbox" checked={sbs} onChange={(e) => setSbs(e.target.checked)} className="h-3 w-3" data-testid="sbs-toggle" />
+                <Checkbox checked={sbs} onChange={(e) => setSbs(e.target.checked)} data-testid="sbs-toggle" />
                 {i18nT('apps.gitStudio.diff.sbs')}
               </label>
             )}
@@ -875,7 +888,7 @@ export default function GitStudioPage() {
                   labelsInListOnly
                 />
                 <label className="flex items-center gap-1 text-[9.5px] text-muted">
-                  <input type="checkbox" checked={wordDiff} onChange={(e) => setWordDiff(e.target.checked)} className="h-3 w-3" data-testid="worddiff-toggle" />
+                  <Checkbox checked={wordDiff} onChange={(e) => setWordDiff(e.target.checked)} data-testid="worddiff-toggle" />
                   {i18nT('apps.gitStudio.diff.wordDiff')}
                 </label>
               </>
@@ -954,7 +967,6 @@ export default function GitStudioPage() {
           if (c) await run(i18nT('apps.gitStudio.common.done'), c.run, { graph: true })
         }}
       />
-      <Notices notices={notices} onDismiss={dismiss} />
     </div>
   )
 }

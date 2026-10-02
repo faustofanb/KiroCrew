@@ -12,6 +12,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, Check, Eye, GitMerge, Loader2 } from 'lucide-react'
 import { api } from '../api'
 import { i18nT } from '../../../i18n/t'
+import { Btn } from '../../../components/ui'
 import type { ConflictItem, ConflictVersions } from '../types'
 import { LoadState, TriState } from './common'
 
@@ -215,30 +216,27 @@ export function ConflictResolver(props: {
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-card px-3">
           <span className="truncate font-mono text-[11.5px] text-text-strong">{selected ?? '—'}</span>
-          <button
-            className="ml-auto shrink-0 rounded border border-border px-2 py-0.5 text-[10px] text-text hover:bg-bg-hover"
-            onClick={() => setShowBase((s) => !s)}
-            title={versions?.labels.ours ?? ''}
-          >
+          <Btn className="ml-auto shrink-0 px-2 py-0 text-[10px]" onClick={() => setShowBase((s) => !s)} title={versions?.labels.ours ?? ''}>
             <span className="inline-flex items-center gap-1">
               <Eye size={11} />
               {i18nT('apps.gitStudio.conflict.showBase')}
             </span>
-          </button>
-          <button className="shrink-0 rounded border border-accent px-2 py-0.5 text-[10px] text-accent hover:bg-accent-subtle" disabled={saving} onClick={() => quickTake('ours')} data-testid="take-ours">
+          </Btn>
+          <Btn primary disabled={saving} onClick={() => quickTake('ours')} data-testid="take-ours" className="shrink-0 px-2 py-0 text-[10px]">
             {i18nT('apps.gitStudio.conflict.takeOurs')}
-          </button>
-          <button className="shrink-0 rounded border border-aim px-2 py-0.5 text-[10px] text-aim hover:bg-bg-hover" disabled={saving} onClick={() => quickTake('theirs')} data-testid="take-theirs">
+          </Btn>
+          <Btn disabled={saving} onClick={() => quickTake('theirs')} data-testid="take-theirs" className="shrink-0 px-2 py-0 text-[10px]">
             {i18nT('apps.gitStudio.conflict.takeTheirs')}
-          </button>
-          <button
-            className="shrink-0 rounded bg-accent px-2.5 py-0.5 text-[10px] text-accent-fg hover:opacity-90 disabled:opacity-40"
+          </Btn>
+          <Btn
+            primary
+            className="shrink-0 px-2.5 py-0 text-[10px]"
             disabled={saving || !selected || unresolved > 0}
             onClick={saveMerged}
             data-testid="resolve-merged"
           >
             {saving ? <Loader2 size={11} className="animate-spin" /> : i18nT('apps.gitStudio.conflict.markResolved')}
-          </button>
+          </Btn>
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-3">
           {vState === 'loading' && <div className="flex justify-center p-4"><Loader2 size={16} className="animate-spin text-muted" /></div>}
@@ -270,7 +268,7 @@ export function ConflictResolver(props: {
                       <span>vs</span>
                       <span>{b.labelTheirs}</span>
                       <span className="ml-auto flex gap-1">
-                        <button className="rounded border border-border px-1.5 py-px text-[9px] text-text hover:bg-bg-hover" onClick={() => decide(i, 'both')}>{i18nT('apps.gitStudio.conflict.both')}</button>
+                        <Btn className="px-1.5 py-0 text-[9px]" onClick={() => decide(i, 'both')}>{i18nT('apps.gitStudio.conflict.both')}</Btn>
                       </span>
                     </div>
                     <div className={`flex gap-1 p-1 ${showBase ? 'flex-col' : ''}`}>

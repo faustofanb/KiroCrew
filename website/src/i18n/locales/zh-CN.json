@@ -5696,7 +5696,10 @@
         "newName": "新名称",
         "rmConfirm": "删除 {{name}}？",
         "mkdirPlaceholder": "新建目录名，回车创建…"
-      }
+      },
+      "conn.remove": "移除 {{name}}",
+      "files.cancelRename": "取消",
+      "exec.timeoutLine": "⏱ 超时 {{s}}s"
     },
     "cicd": {
       "title": "CI/CD Studio",

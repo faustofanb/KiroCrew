@@ -14,6 +14,7 @@ import { memo, useState } from 'react'
 import { ChevronDown, FileText } from 'lucide-react'
 import hljs from 'highlight.js/lib/common'
 import { i18nT } from '../../../i18n/t'
+import { Btn, Checkbox } from '../../../components/ui'
 import type { DiffFile, DiffHunk, DiffLine } from '../types'
 
 const RENDER_CAP = 4000 // lines per file; beyond this the file truncates honestly
@@ -86,11 +87,10 @@ function LineCheckbox(props: { line: DiffLine; ctx: RowCtx }) {
   if (!ctx.staging || (line.t !== 'add' && line.t !== 'del' && line.t !== 'mod')) return <span className="w-4 shrink-0" />
   const key = lineKey(line)
   return (
-    <input
-      type="checkbox"
+    <Checkbox
       checked={ctx.selected.has(key)}
       onChange={() => ctx.toggle(line)}
-      className="mt-0.5 h-3 w-3 shrink-0 accent-[var(--color-accent)]"
+      className="mt-0.5"
       aria-label={`${ctx.reverse ? i18nT('apps.gitStudio.diff.unstageLine') : i18nT('apps.gitStudio.diff.stageLine')} ${line.new ?? line.old}`}
       data-testid={`line-check-${lineKey(line)}`}
     />
@@ -198,13 +198,13 @@ function HunkBlock(props: {
           <span className="text-ok">+{adds}</span> <span className="text-danger">−{dels}</span>
         </span>
         {ctx.staging && (
-          <button
-            className="ml-auto shrink-0 rounded border border-accent px-1.5 py-px text-[9px] text-accent hover:bg-accent-subtle"
+          <Btn
+            className="ml-auto shrink-0 px-1.5 py-0 text-[9px]"
             onClick={() => onHunkAll(fileIdx, hunkIdx)}
             data-testid={`hunk-stage-${fileIdx}-${hunkIdx}`}
           >
             {ctx.reverse ? i18nT('apps.gitStudio.diff.unstageHunk') : i18nT('apps.gitStudio.diff.stageHunk')}
-          </button>
+          </Btn>
         )}
       </div>
       {sbs
@@ -336,8 +336,9 @@ export function DiffViewer(props: {
                 <span className="text-ok">+{adds}</span> <span className="text-danger">−{dels}</span>
               </span>
               {ctx.selected.size > 0 && props.onStageSelection && (
-                <button
-                  className="shrink-0 rounded bg-accent px-2 py-0.5 text-[10px] text-accent-fg hover:opacity-90 disabled:opacity-40"
+                <Btn
+                  primary
+                  className="shrink-0 px-2 py-0.5 text-[10px]"
                   disabled={props.busy}
                   onClick={(e) => {
                     e.stopPropagation()
@@ -348,7 +349,7 @@ export function DiffViewer(props: {
                   {staging === 'staged'
                     ? i18nT('apps.gitStudio.diff.unstageSelection', { n: String(ctx.selected.size) })
                     : i18nT('apps.gitStudio.diff.stageSelection', { n: String(ctx.selected.size) })}
-                </button>
+                </Btn>
               )}
             </div>
             {!isCollapsed &&

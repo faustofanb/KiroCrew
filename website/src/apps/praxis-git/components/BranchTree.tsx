@@ -11,6 +11,8 @@ import { GitBranch, Globe, Loader2, Tag as TagIcon } from 'lucide-react'
 import { api } from '../api'
 import { i18nT } from '../../../i18n/t'
 import type { Branch, Remote, RemoteBranch, Tag } from '../types'
+import { Btn } from '../../../components/ui'
+import SegmentedControl from '../../../components/SegmentedControl'
 import { ConfirmDialog, InlineInput, LoadState, TriState } from './common'
 
 function TrackBadge(props: { b: Branch }) {
@@ -80,15 +82,13 @@ export function BranchTree(props: {
     <div className="flex h-full min-h-0 flex-col" data-testid="branch-tree">
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border bg-card px-2">
         <GitBranch size={13} className="ml-1 text-accent" />
-        {(['branches', 'tags', 'remotes'] as const).map((t) => (
-          <button
-            key={t}
-            className={`rounded px-2 py-0.5 text-[11px] ${tab === t ? 'bg-accent-subtle font-semibold text-accent' : 'text-muted hover:bg-bg-hover'}`}
-            onClick={() => setTab(t)}
-          >
-            {i18nT(`apps.gitStudio.branch.tab_${t}`)}
-          </button>
-        ))}
+        <SegmentedControl
+          segments={(['branches', 'tags', 'remotes'] as const).map((t) => ({ key: t, label: i18nT(`apps.gitStudio.branch.tab_${t}`) }))}
+          value={tab}
+          onChange={(t) => setTab(t)}
+          layoutId="gitstudio-branch-tree"
+          ariaLabel={i18nT('apps.gitStudio.branch.tab_branches')}
+        />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
         <TriState state={props.state} error={props.error} empty={tab === 'branches' && !(props.branches?.local.length)}>
@@ -282,9 +282,9 @@ function RemoteAddRow(props: { repo: string; onRefresh: () => void; onNotice: (k
     <div className="flex gap-1">
       <input value={name} onChange={(e) => setName(e.target.value)} placeholder={i18nT('apps.gitStudio.remote.name')} className="h-7 w-24 rounded border border-border bg-bg px-2 font-mono text-[10.5px] text-text outline-none focus:border-accent" data-testid="remote-add-name" />
       <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={i18nT('apps.gitStudio.remote.url')} className="h-7 min-w-0 flex-1 rounded border border-border bg-bg px-2 font-mono text-[10.5px] text-text outline-none focus:border-accent" data-testid="remote-add-url" />
-      <button className="shrink-0 rounded bg-accent px-2 text-[10.5px] text-accent-fg hover:opacity-90 disabled:opacity-40" disabled={busy || !name.trim() || !url.trim()} onClick={add} data-testid="remote-add-go">
+      <Btn primary className="shrink-0 px-2 py-0.5 text-[10.5px]" disabled={busy || !name.trim() || !url.trim()} onClick={add} data-testid="remote-add-go">
         {busy ? <Loader2 size={11} className="animate-spin" /> : i18nT('apps.gitStudio.remote.add')}
-      </button>
+      </Btn>
     </div>
   )
 }

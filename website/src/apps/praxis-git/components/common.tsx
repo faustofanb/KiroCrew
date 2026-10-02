@@ -1,12 +1,19 @@
-/** Git Studio shared primitives — windowing, tri-states, confirm dialog.
-
-`useWindow` is the same idea as the chat virtualizer (fixed row height,
-rAF-throttled scroll, overscan) reduced to its reusable core: the graph and
-the working-directory list both render 10k+ rows without a dependency.
-*/
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { AlertTriangle, Loader2 } from 'lucide-react'
+/**
+ * Git Studio shared primitives — windowing, tri-states, confirm dialog.
+ *
+ * Visual chrome comes from the app's UI kit like the rest of the dashboard
+ * (`ErrorNotice`, `EmptyState`, `Modal`, `Btn`); only the app-specific pieces
+ * live here: `useWindow` (fixed-height row windowing, rAF-coalesced),
+ * `TriState` (one shape for every list's empty/loading/error contract), and a
+ * `ConfirmDialog` that keeps the simple `{title, body, danger, run}` prop
+ * shape the call sites already use while rendering through the shared modal.
+ */
+import { useCallback, useLayoutEffect, useRef, useState } from 'react'
+import { Inbox, Loader2 } from 'lucide-react'
 import { i18nT } from '../../../i18n/t'
+import { Btn, EmptyState } from '../../../components/ui'
+import ErrorNotice from '../../../components/ErrorNotice'
+import Modal from '../../../components/Modal'
 
 export type LoadState = 'idle' | 'loading' | 'error' | 'ready'
 
@@ -51,10 +58,19 @@ export function useWindow(opts: {
   const first = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan)
   const last = Math.min(count, Math.ceil((scrollTop + height) / rowHeight) + overscan)
 
-  return { ref, onScroll, first, last, totalHeight: count * rowHeight, scrollToIndex: (i: number) => { if (ref.current) ref.current.scrollTop = Math.max(0, i * rowHeight - 40) } }
+  return {
+    ref,
+    onScroll,
+    first,
+    last,
+    totalHeight: count * rowHeight,
+    scrollToIndex: (i: number) => {
+      if (ref.current) ref.current.scrollTop = Math.max(0, i * rowHeight - 40)
+    },
+  }
 }
 
-/** Empty / loading / error tri-state wrapper for any list or panel. */
+/** Empty / loading / error tri-state wrapper — the app kit does the looks. */
 export function TriState(props: {
   state: LoadState
   error?: string | null
@@ -72,20 +88,19 @@ export function TriState(props: {
     )
   }
   if (props.state === 'error') {
-    return (
-      <div className="flex items-start gap-2 rounded border border-danger bg-danger-subtle p-3 text-[12px] text-danger">
-        <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-        <span className="min-w-0 break-all">{props.error || i18nT('apps.gitStudio.common.error')}</span>
-      </div>
-    )
+    return <ErrorNotice message={props.error || i18nT('apps.gitStudio.common.error')} />
   }
   if (props.empty) {
-    return <div className="p-4 text-center text-[12px] text-muted">{props.emptyText ?? i18nT('apps.gitStudio.common.empty')}</div>
+    return (
+      <div className="py-2">
+        <EmptyState icon={<Inbox size={22} />} title={props.emptyText ?? i18nT('apps.gitStudio.common.empty')} testId="gitstudio-empty" />
+      </div>
+    )
   }
   return <>{props.children}</>
 }
 
-/** Blocking confirmation for destructive git operations. */
+/** Blocking confirmation for destructive git operations (shared modal skin). */
 export function ConfirmDialog(props: {
   open: boolean
   title: string
@@ -95,32 +110,21 @@ export function ConfirmDialog(props: {
   onCancel: () => void
   onConfirm: () => void
 }) {
-  if (!props.open) return null
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
-      <div className="w-full max-w-md rounded-lg border border-border bg-card p-4 shadow-xl">
-        <div className="mb-2 flex items-center gap-2 text-[14px] font-semibold text-text-strong">
-          {props.danger && <AlertTriangle size={16} className="text-danger" />}
-          {props.title}
-        </div>
-        <div className="mb-4 text-[12.5px] leading-relaxed text-text">{props.body}</div>
-        <div className="flex justify-end gap-2">
-          <button
-            className="rounded border border-border px-3 py-1.5 text-[12px] text-text hover:bg-bg-hover"
-            onClick={props.onCancel}
-          >
-            {i18nT('apps.gitStudio.common.cancel')}
-          </button>
-          <button
-            className={`rounded px-3 py-1.5 text-[12px] ${props.danger ? 'bg-danger text-danger-fg hover:opacity-90' : 'bg-accent text-accent-fg hover:opacity-90'}`}
-            onClick={props.onConfirm}
-            data-testid="confirm-ok"
-          >
-            {props.confirmLabel ?? i18nT('apps.gitStudio.common.confirm')}
-          </button>
-        </div>
+    <Modal open={props.open} onClose={props.onCancel} title={props.title} maxWidth={440}>
+      <div className="text-[12.5px] leading-relaxed text-text">{props.body}</div>
+      <div className="mt-4 flex justify-end gap-2">
+        <Btn onClick={props.onCancel}>{i18nT('apps.gitStudio.common.cancel')}</Btn>
+        <Btn
+          danger={props.danger}
+          primary={!props.danger}
+          onClick={props.onConfirm}
+          data-testid="confirm-ok"
+        >
+          {props.confirmLabel ?? i18nT('apps.gitStudio.common.confirm')}
+        </Btn>
       </div>
-    </div>
+    </Modal>
   )
 }
 
@@ -145,38 +149,7 @@ export function InlineInput(props: {
         }
         if (e.key === 'Escape') (e.target as HTMLInputElement).blur()
       }}
-      className={`h-7 rounded border border-border bg-bg px-2 text-[11px] text-text outline-none placeholder:text-muted focus:border-accent ${props.className ?? ''}`}
+      className={`h-7 rounded-md border border-border bg-bg px-2 text-[11px] text-text outline-none placeholder:text-muted focus-visible:border-accent ${props.className ?? ''}`}
     />
-  )
-}
-
-/** Toast area for operation results (bounded, auto-dismiss). */
-export type Notice = { id: number; kind: 'ok' | 'error' | 'info'; text: string }
-
-export function Notices(props: { notices: Notice[]; onDismiss: (id: number) => void }) {
-  useEffect(() => {
-    if (!props.notices.length) return
-    const timers = props.notices.map((n) => setTimeout(() => props.onDismiss(n.id), n.kind === 'error' ? 8000 : 4000))
-    return () => timers.forEach(clearTimeout)
-  }, [props.notices, props.onDismiss])
-  if (!props.notices.length) return null
-  return (
-    <div className="pointer-events-none fixed bottom-4 right-4 z-40 flex w-80 flex-col gap-2">
-      {props.notices.map((n) => (
-        <button
-          key={n.id}
-          onClick={() => props.onDismiss(n.id)}
-          className={`pointer-events-auto rounded border px-3 py-2 text-left text-[12px] shadow-lg ${
-            n.kind === 'error'
-              ? 'border-danger bg-danger-subtle text-danger'
-              : n.kind === 'ok'
-                ? 'border-ok bg-ok-subtle text-ok'
-                : 'border-border bg-card text-text'
-          }`}
-        >
-          {n.text}
-        </button>
-      ))}
-    </div>
   )
 }

@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowDown, ArrowUp, GitBranch, Loader2, Play, RotateCcw, SkipForward, Square } from 'lucide-react'
 import { api } from '../api'
+import { Btn } from '../../../components/ui'
 import { i18nT } from '../../../i18n/t'
 import type { RebaseStatus } from '../types'
 import { LoadState, TriState } from './common'
@@ -150,18 +151,18 @@ export function RebasePanel(props: {
                 </div>
               )}
               <div className="flex flex-wrap gap-2">
-                <button className="inline-flex items-center gap-1 rounded bg-accent px-2.5 py-1 text-[11px] text-accent-fg hover:opacity-90 disabled:opacity-40" disabled={busy} onClick={() => control('continue')} data-testid="rebase-continue">
+                <Btn primary className="px-2.5 py-0.5 text-[11px]" disabled={busy} onClick={() => control('continue')} data-testid="rebase-continue">
                   {busy ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
                   {i18nT('apps.gitStudio.rebase.continue')}
-                </button>
-                <button className="inline-flex items-center gap-1 rounded border border-border px-2.5 py-1 text-[11px] text-text hover:bg-bg-hover disabled:opacity-40" disabled={busy} onClick={() => control('skip')}>
+                </Btn>
+                <Btn className="px-2.5 py-0.5 text-[11px]" disabled={busy} onClick={() => control('skip')}>
                   <SkipForward size={11} />
                   {i18nT('apps.gitStudio.rebase.skip')}
-                </button>
-                <button className="inline-flex items-center gap-1 rounded border border-danger px-2.5 py-1 text-[11px] text-danger hover:bg-danger-subtle disabled:opacity-40" disabled={busy} onClick={() => control('abort')} data-testid="rebase-abort">
+                </Btn>
+                <Btn danger className="px-2.5 py-0.5 text-[11px]" disabled={busy} onClick={() => control('abort')} data-testid="rebase-abort">
                   <Square size={11} />
                   {i18nT('apps.gitStudio.rebase.abort')}
-                </button>
+                </Btn>
               </div>
               <div className="rounded border border-border p-2">
                 <div className="mb-1 text-[11px] font-semibold text-text-strong">{i18nT('apps.gitStudio.rebase.rewordCurrent')}</div>
@@ -172,13 +173,13 @@ export function RebasePanel(props: {
                     className="h-7 min-w-0 flex-1 rounded border border-border bg-bg px-2 text-[11px] text-text outline-none focus:border-accent"
                     data-testid="rebase-reword-input"
                   />
-                  <button
-                    className="rounded border border-accent px-2 py-0.5 text-[10.5px] text-accent hover:bg-accent-subtle disabled:opacity-40"
+                  <Btn
+                    className="px-2 py-0 text-[10.5px]"
                     disabled={busy || !rewordMsg.trim()}
                     onClick={() => control('reword', { message: rewordMsg })}
                   >
                     {i18nT('apps.gitStudio.rebase.amend')}
-                  </button>
+                  </Btn>
                 </div>
               </div>
               {!!doneCount && (
@@ -285,22 +286,23 @@ export function RebasePanel(props: {
                 </div>
               </TriState>
               <div className="flex items-center gap-2">
-                <button
-                  className="inline-flex items-center gap-1 rounded bg-accent px-3 py-1 text-[11.5px] text-accent-fg hover:opacity-90 disabled:opacity-40"
+                <Btn
+                  primary
+                  className="px-3 py-0.5 text-[11.5px]"
                   disabled={busy || !todo.length || !upstream.trim()}
                   onClick={start}
                   data-testid="rebase-start"
                 >
                   {busy ? <Loader2 size={11} className="animate-spin" /> : <RotateCcw size={11} />}
                   {i18nT('apps.gitStudio.rebase.start')}
-                </button>
-                <button
-                  className="rounded border border-border px-2.5 py-1 text-[11px] text-text hover:bg-bg-hover disabled:opacity-40"
+                </Btn>
+                <Btn
+                  className="px-2.5 py-0.5 text-[11px]"
                   disabled={busy || !upstream.trim()}
                   onClick={() => control('start', { upstream: upstream.trim() })}
                 >
                   {i18nT('apps.gitStudio.rebase.startPlain')}
-                </button>
+                </Btn>
                 <span className="text-[10.5px] text-muted">{i18nT('apps.gitStudio.rebase.dragHint')}</span>
               </div>
             </div>

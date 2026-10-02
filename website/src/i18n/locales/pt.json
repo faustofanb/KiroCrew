@@ -5876,7 +5876,10 @@
         "newName": "new name",
         "rmConfirm": "Delete {{name}}?",
         "mkdirPlaceholder": "new directory name, Enter…"
-      }
+      },
+      "conn.remove": "Remove {{name}}",
+      "files.cancelRename": "Cancel",
+      "exec.timeoutLine": "⏱ timed out after {{s}}s"
     },
     "cicd": {
       "title": "CI/CD Studio",
